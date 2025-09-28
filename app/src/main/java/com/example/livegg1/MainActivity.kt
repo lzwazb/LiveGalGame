@@ -63,6 +63,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.tooling.preview.Preview
 import android.content.res.Configuration
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.ui.graphics.Brush
 
 class MainActivity : ComponentActivity() {
 
@@ -304,7 +307,7 @@ private fun CameraScreenContent(
         // 1. 摄像头预览或占位图一直在最底层
         previewView()
 
-        // 2. 覆盖层，根据状态显示不同内容
+        // 2. 图像或加载指示器
         when {
             isLoading -> {
                 // 状态A: 正在加载模型 -> 显示带黑色背景的加载指示器
@@ -343,21 +346,43 @@ private fun CameraScreenContent(
             }
         }
 
-        // 3. 字幕层，始终在最顶层
-        if (captionToShow.isNotEmpty()) {
-            Column(
+        // 将渐变背景和字幕包裹在一个父 Box 中，并对这个父 Box 进行对齐
+        Box(
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            // 渐变背景层
+            Box(
                 modifier = Modifier
-                    .align(Alignment.BottomStart) // 将整个 Column 对齐到左下角
-                    .padding(start = 100.dp, bottom = 70.dp, end = 24.dp) // 使用 padding 控制精确边距
-            ) {
-                val shadow = Shadow(color = Color.Black, offset = Offset(4f, 4f), blurRadius = 8f)
-                Text(
-                    text = captionToShow,
-                    color = Color.White,
-                    fontSize = 20.sp,
-                    textAlign = TextAlign.Start,
-                    style = TextStyle(shadow = shadow)
-                )
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.4f)
+                    .background(
+                        brush = Brush.verticalGradient(
+                            // 使用 colorStops 精确控制渐变
+                            colorStops = arrayOf(
+                                0.0f to Color.Transparent,  // 顶部：完全透明
+                                0.001f to Color.Transparent,  // 中间：仍然是完全透明
+                                1.0f to Color(0x99FFC0CB) // 底部：淡粉色
+                            )
+                        )
+                    )
+            ) {}
+
+            // 字幕层
+            if (captionToShow.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 100.dp, bottom = 70.dp, end = 24.dp)
+                ) {
+                    val shadow = Shadow(color = Color.Black, offset = Offset(4f, 4f), blurRadius = 8f)
+                    Text(
+                        text = captionToShow,
+                        color = Color.White,
+                        fontSize = 20.sp,
+                        textAlign = TextAlign.Start,
+                        style = TextStyle(shadow = shadow)
+                    )
+                }
             }
         }
     }
