@@ -13,6 +13,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -20,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -406,6 +410,29 @@ private fun CameraScreenContent(
                         textAlign = TextAlign.Start,
                         style = TextStyle(shadow = shadow)
                     )
+                }
+            }
+
+            // 底部小按钮行（高度与进度条接近）
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .offset(x = -screenWidthDp / 5)
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(0.dp)
+            ) {
+                val btnHeight = 16.dp
+                TextButton(onClick = { Log.d("CameraScreen", "Button 1 clicked") }, contentPadding = PaddingValues(0.dp), modifier = Modifier.height(btnHeight)) {
+                    Text(text = "SAVE", fontSize = 12.sp, color = Color.White)
+                }
+                TextButton(onClick = { Log.d("CameraScreen", "Button 2 clicked") }, contentPadding = PaddingValues(0.dp), modifier = Modifier.height(btnHeight)) {
+                    Text(text = "LOAD", fontSize = 12.sp, color = Color.White)
+                }
+                TextButton(onClick = { Log.d("CameraScreen", "Button 3 clicked") }, contentPadding = PaddingValues(0.dp), modifier = Modifier.height(btnHeight)) {
+                    Text(text = "Q.SAVE", fontSize = 12.sp, color = Color.White)
+                }
+                TextButton(onClick = { Log.d("CameraScreen", "Button 4 clicked") }, contentPadding = PaddingValues(0.dp), modifier = Modifier.height(btnHeight)) {
+                    Text(text = "Q.LOAD", fontSize = 12.sp, color = Color.White)
                 }
             }
         }
