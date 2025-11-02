@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.draw.clip
 // ...existing imports
 import com.example.livegg1.Utils.cropBitmapToAspectRatio
 import com.example.livegg1.Utils.takePhoto
@@ -84,6 +85,7 @@ import androidx.core.content.ContextCompat
 import android.media.MediaPlayer
 import java.lang.IllegalStateException
 import com.example.livegg1.R
+import kotlin.random.Random
 
 @Composable
 fun CameraScreen(
@@ -111,6 +113,12 @@ fun CameraScreen(
     val updateIntervalMs = 3500L // 每次更新间隔（毫秒），可根据需要调整为 6000L
     var progress by remember { mutableStateOf(0f) } // 0f 开始，逐渐增长到 1f
     var timeRemainingSec by remember { mutableStateOf(updateIntervalMs / 1000f) }
+
+    val affectionLevel = remember {
+        val min = 1f / 3f
+        val max = 2f / 3f
+        min + Random.nextFloat() * (max - min)
+    }
 
     // 新的状态管理：用于连续识别
     val recognizedSentences = remember { mutableStateListOf<String>() }
@@ -331,6 +339,7 @@ fun CameraScreen(
         timeRemainingSec = timeRemainingSec,
         chapterTitle = chapterTitle,
         previewView = { AndroidView({ previewView }, modifier = Modifier.fillMaxSize()) },
+        affectionLevel = affectionLevel,
         onManageTriggers = onManageTriggers
     )
 }
@@ -346,6 +355,7 @@ private fun CameraScreenContent(
     rectOffsetY: Dp = 10.dp,
     chapterTitle: String,
     previewView: @Composable () -> Unit,
+    affectionLevel: Float,
     onManageTriggers: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -356,6 +366,23 @@ private fun CameraScreenContent(
     Box(modifier = Modifier.fillMaxSize()) {
         // 1. 摄像头预览或占位图一直在最底层
         previewView()
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(start = 32.dp)
+                .offset(x = 30.dp, y = (-40).dp)
+                .zIndex(3f),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "",
+                color = Color.White,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            AffectionBar(affectionLevel = affectionLevel)
+        }
 
         // 左上角章节标签背景
         Box(
@@ -593,6 +620,39 @@ private fun CameraScreenContent(
     }
 }
 
+@Composable
+private fun AffectionBar(
+    affectionLevel: Float,
+    modifier: Modifier = Modifier,
+    barHeight: Dp = 180.dp,
+    barWidth: Dp = 24.dp
+) {
+    val clamped = affectionLevel.coerceIn(0f, 1f)
+    Box(
+        modifier = modifier
+            .width(barWidth)
+            .height(barHeight)
+            .clip(RoundedCornerShape(percent = 50))
+            .background(Color.White.copy(alpha = 0.3f)),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(4.dp),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(clamped)
+                    .clip(RoundedCornerShape(percent = 50))
+                    .background(Color(0xFFFF6FA5))
+            )
+        }
+    }
+}
+
 @Preview(
     showBackground = true,
     widthDp = 853,
@@ -616,6 +676,7 @@ fun CameraScreenPreview() {
             previewView = {
                 Box(modifier = Modifier.fillMaxSize().background(Color.DarkGray))
             },
+            affectionLevel = 0.55f,
             onManageTriggers = {}
         )
     }
