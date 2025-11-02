@@ -39,6 +39,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 // CompositionLocalProvider / LocalMinimumTouchTargetEnforcement removed to avoid dependency on material
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -77,6 +79,7 @@ import com.example.livegg1.Utils.cropBitmapToAspectRatio
 import com.example.livegg1.Utils.takePhoto
 import com.example.livegg1.ui.theme.LiveGG1Theme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -127,6 +130,7 @@ fun CameraScreen(
     var lastBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    var isInForeground by remember { mutableStateOf(true) }
 
     // 进度条相关：显示距离下一次更新的剩余时间
     val updateIntervalMs = 3500L // 每次更新间隔（毫秒），可根据需要调整为 6000L
@@ -139,7 +143,8 @@ fun CameraScreen(
         mutableStateOf(min + Random.nextFloat() * (max - min))
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(isInForeground) {
+        if (!isInForeground) return@LaunchedEffect
         val decayIntervalMs = 2000L
         val decayStep = 0.01f
         while (isActive) {
@@ -235,9 +240,13 @@ fun CameraScreen(
         }
     }
 
-    LaunchedEffect(isDialogVisible, idleBgmAsset) {
-        val targetAsset = if (isDialogVisible) "TeaBreak.mp3" else idleBgmAsset
-        switchBgm(targetAsset)
+    LaunchedEffect(isDialogVisible, idleBgmAsset, isInForeground) {
+        if (!isInForeground) {
+            releasePlayer()
+        } else {
+            val targetAsset = if (isDialogVisible) "TeaBreak.mp3" else idleBgmAsset
+            switchBgm(targetAsset)
+        }
     }
 
     // --- Vosk 监听器 (连续识别逻辑) ---
@@ -305,6 +314,20 @@ fun CameraScreen(
     // --- 核心逻辑：绑定相机和资源管理 ---
     DisposableEffect(lifecycleOwner) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        val lifecycle = lifecycleOwner.lifecycle
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> isInForeground = true
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
+                    isInForeground = false
+                    speechService?.stop()
+                    releasePlayer()
+                }
+                Lifecycle.Event.ON_DESTROY -> isInForeground = false
+                else -> {}
+            }
+        }
+        lifecycle.addObserver(observer)
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
             val preview = CameraPreview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
@@ -318,6 +341,7 @@ fun CameraScreen(
         }, ContextCompat.getMainExecutor(context))
 
         onDispose {
+            lifecycle.removeObserver(observer)
             cameraProviderFuture.get().unbindAll()
             speechService?.stop()
             speechService?.shutdown()
@@ -345,13 +369,28 @@ fun CameraScreen(
     }
 
     // --- 核心逻辑：启动连续语音识别 ---
-    LaunchedEffect(speechService) {
-        speechService?.startListening(listener)
+    LaunchedEffect(speechService, isInForeground) {
+        val service = speechService ?: return@LaunchedEffect
+        if (!isInForeground) {
+            service.stop()
+            return@LaunchedEffect
+        }
         Log.d("Vosk", "Continuous listening started.")
+        try {
+            service.startListening(listener)
+            awaitCancellation()
+        } finally {
+            service.stop()
+        }
     }
 
     // --- 核心逻辑：定时拍照更新背景 ---
-    LaunchedEffect(imageCapture) {
+    LaunchedEffect(imageCapture, isInForeground) {
+        if (!isInForeground) {
+            progress = 0f
+            timeRemainingSec = updateIntervalMs / 1000f
+            return@LaunchedEffect
+        }
         // 首次启动时，先拍一张照片作为背景
         takePhoto(imageCapture, cameraExecutor, { imageToShow = cropBitmapToAspectRatio(it, screenAspectRatio) }, {})
         delay(1000)
