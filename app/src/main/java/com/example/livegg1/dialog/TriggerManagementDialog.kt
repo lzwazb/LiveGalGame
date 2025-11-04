@@ -111,6 +111,10 @@ fun TriggerManagementDialog(
                 }
                 showAddOrEditDialog = null
             },
+            onDelete = { toDelete ->
+                onDeleteTrigger(toDelete)
+                showAddOrEditDialog = null
+            },
             onDismiss = { showAddOrEditDialog = null }
         )
     }
@@ -130,11 +134,13 @@ private fun TriggerItem(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 Text(text = "关键词: \"${trigger.keyword}\"", fontWeight = FontWeight.SemiBold)
                 Text(text = "触发弹窗: ${trigger.dialogType.name}", style = MaterialTheme.typography.bodySmall)
                 if (trigger.dialogType == DialogType.CHOICE_DIALOG) {
@@ -147,7 +153,10 @@ private fun TriggerItem(
                     }
                 }
             }
-            Row {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 IconButton(onClick = { onEdit(trigger) }) {
                     Icon(Icons.Default.Edit, contentDescription = "编辑", tint = MaterialTheme.colorScheme.primary)
                 }
@@ -165,6 +174,7 @@ private fun AddOrEditTriggerDialog(
     trigger: KeywordTrigger?,
     isEditing: Boolean,
     onConfirm: (keyword: String, dialogType: DialogType, options: List<TriggerOption>) -> Unit,
+    onDelete: (KeywordTrigger) -> Unit,
     onDismiss: () -> Unit
 ) {
     var keyword by remember(trigger?.id) { mutableStateOf(trigger?.keyword ?: "") }
@@ -284,6 +294,25 @@ private fun AddOrEditTriggerDialog(
                     ) {
                         Icon(Icons.Default.Add, contentDescription = "添加选项")
                         Text("添加选项", modifier = Modifier.padding(start = 4.dp))
+                    }
+                }
+
+                if (isEditing && trigger != null) {
+                    Spacer(Modifier.height(24.dp))
+                    Divider()
+                    Spacer(Modifier.height(16.dp))
+                    OutlinedButton(
+                        onClick = {
+                            onDelete(trigger)
+                            onDismiss()
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.6f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("删除该触发器")
                     }
                 }
             }
