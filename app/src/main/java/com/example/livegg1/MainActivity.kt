@@ -94,10 +94,15 @@ class MainActivity : ComponentActivity() {
                     var activeTrigger by remember { mutableStateOf<KeywordTrigger?>(null) }
                     var affectionEventId by remember { mutableLongStateOf(0L) }
                     var affectionEventDelta by remember { mutableStateOf(0f) }
+                    var whiteFlashEventId by remember { mutableLongStateOf(0L) }
 
                     fun queueAffectionChange(delta: Float) {
                         affectionEventDelta = delta
                         affectionEventId++
+                    }
+
+                    fun triggerWhiteFlash() {
+                        whiteFlashEventId++
                     }
 
                     fun restartListeningIfPossible() {
@@ -149,51 +154,50 @@ class MainActivity : ComponentActivity() {
                         },
                         isDialogVisible = showKeywordDialog || showTriggerDialog,
                         idleBgmAsset = idleBgmAsset,
-                            onManageTriggers = {
+                        onManageTriggers = {
                             speechListener.stopListening()
                             showTriggerDialog = true
-                            },
-                            affectionEventId = affectionEventId,
-                            affectionEventDelta = affectionEventDelta
+                        },
+                        affectionEventId = affectionEventId,
+                        affectionEventDelta = affectionEventDelta,
+                        whiteFlashEventId = whiteFlashEventId
                     )
 
                     if (showKeywordDialog) {
-                        KeywordDialog(
-                            onAccept = {
-                                Log.d("MainActivity", "Keyword accepted: ${activeTrigger?.keyword}")
-                                idleBgmAsset = "Ah.mp3"
-                                queueAffectionChange(-0.4f)
-                                showKeywordDialog = false
-                                activeTrigger = null
-                                if (!showTriggerDialog) {
-                                    restartListeningIfPossible()
+                        activeTrigger?.let { trigger ->
+                            KeywordDialog(
+                                options = trigger.options,
+                                onOptionSelected = { option ->
+                                    Log.d(
+                                        "MainActivity",
+                                        "Option selected: ${option.label} for keyword ${trigger.keyword}"
+                                    )
+                                    idleBgmAsset = option.bgmAsset
+                                    queueAffectionChange(option.affectionDelta)
+                                    if (option.triggerWhiteFlash) {
+                                        triggerWhiteFlash()
+                                    }
+                                    showKeywordDialog = false
+                                    activeTrigger = null
+                                    if (!showTriggerDialog) {
+                                        restartListeningIfPossible()
+                                    }
+                                },
+                                onDismiss = {
+                                    showKeywordDialog = false
+                                    activeTrigger = null
+                                    if (!showTriggerDialog) {
+                                        restartListeningIfPossible()
+                                    }
                                 }
-                            },
-                            onReject = {
-                                Log.d("MainActivity", "Keyword rejected: ${activeTrigger?.keyword}")
-                                idleBgmAsset = "casual.mp3"
-                                queueAffectionChange(0.4f)
-                                showKeywordDialog = false
-                                activeTrigger = null
-                                if (!showTriggerDialog) {
-                                    restartListeningIfPossible()
-                                }
-                            },
-                            onDismiss = {
-                                showKeywordDialog = false
-                                activeTrigger = null
-                                if (!showTriggerDialog) {
-                                    restartListeningIfPossible()
-                                }
-                            },
-                            onSelectBgm = { asset -> idleBgmAsset = asset }
-                        )
+                            )
+                        }
                     }
 
                     if (showTriggerDialog) {
                         TriggerManagementDialog(
                             triggers = triggers,
-                            onAddTrigger = { keyword, dialogType ->
+                            onAddTrigger = { keyword, dialogType, options ->
                                 val cleaned = keyword.trim()
                                 val duplicate = triggers.any { it.keyword.equals(cleaned, ignoreCase = true) }
                                 if (cleaned.isEmpty()) {
@@ -201,7 +205,17 @@ class MainActivity : ComponentActivity() {
                                 } else if (duplicate) {
                                     Log.w("MainActivity", "Keyword already exists: $cleaned")
                                 } else {
-                                    val newTrigger = KeywordTrigger(keyword = cleaned, dialogType = dialogType)
+                                    val sanitizedOptions = options.map { option ->
+                                        option.copy(
+                                            label = option.label.trim().ifEmpty { option.label },
+                                            bgmAsset = option.bgmAsset.trim().ifEmpty { option.bgmAsset }
+                                        )
+                                    }
+                                    val newTrigger = KeywordTrigger(
+                                        keyword = cleaned,
+                                        dialogType = dialogType,
+                                        options = sanitizedOptions
+                                    )
                                     Log.d("MainActivity", "Keyword added: ${newTrigger.keyword}")
                                     triggers = triggers + newTrigger
                                 }
@@ -216,7 +230,15 @@ class MainActivity : ComponentActivity() {
                                 } else if (duplicate) {
                                     Log.w("MainActivity", "Keyword already exists: $cleaned")
                                 } else {
-                                    val sanitized = updated.copy(keyword = cleaned)
+                                    val sanitized = updated.copy(
+                                        keyword = cleaned,
+                                        options = updated.options.map { option ->
+                                            option.copy(
+                                                label = option.label.trim().ifEmpty { option.label },
+                                                bgmAsset = option.bgmAsset.trim().ifEmpty { option.bgmAsset }
+                                            )
+                                        }
+                                    )
                                     Log.d("MainActivity", "Keyword updated: ${sanitized.keyword}")
                                     triggers = triggers.map { existing ->
                                         if (existing.id == original.id) sanitized else existing
