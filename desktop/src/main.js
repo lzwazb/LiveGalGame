@@ -18,25 +18,38 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       enableRemoteModule: false,
-      preload: path.join(__dirname, 'preload.js')
+      preload: path.join(__dirname, 'preload.js'),
+      // 禁用开发者工具快捷键（可选，如果需要可以注释掉）
+      // devTools: false
     },
-    titleBarStyle: 'hidden', // 隐藏标题栏
+    titleBarStyle: 'hidden', // macOS 隐藏标题栏
     show: false, // 先不显示，准备好后再显示
     title: 'LiveGalGame Desktop',
-    // 无边框窗口
-    frame: false
+    // 无边框窗口，看起来更像客户端应用
+    frame: false,
+    // 确保窗口看起来像原生应用
+    backgroundColor: '#f8f6f7', // 浅色背景色，避免加载时闪烁
+    // 禁用菜单栏（可选）
+    autoHideMenuBar: true
   });
 
-  // 加载index.html
-  mainWindow.loadFile(path.join(__dirname, 'renderer/index.html'));
+  // 加载React应用
+  if (process.env.NODE_ENV === 'development') {
+    // 开发环境：加载Vite开发服务器
+    mainWindow.loadURL('http://localhost:5173');
+  } else {
+    // 生产环境：加载构建后的文件
+    mainWindow.loadFile(path.join(__dirname, '../dist/renderer/index.html'));
+  }
 
   // 窗口准备就绪后显示
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
-    // 开发环境自动打开开发者工具
-    if (process.env.NODE_ENV === 'development') {
-      mainWindow.webContents.openDevTools();
-    }
+    // 开发环境不自动打开开发者工具，保持客户端外观
+    // 如需调试，可以使用快捷键 Cmd+Shift+I (Mac) 或 Ctrl+Shift+I (Windows/Linux)
+    // if (process.env.NODE_ENV === 'development') {
+    //   mainWindow.webContents.openDevTools();
+    // }
   });
 
   // 窗口关闭事件
@@ -464,8 +477,14 @@ function createHUDWindow() {
     // 确保窗口可以调整大小（显式设置）
     hudWindow.setResizable(true);
 
-    // 加载HUD页面
-    hudWindow.loadFile(path.join(__dirname, 'renderer/hud.html'));
+    // 加载HUD页面 - 区分开发和生产环境
+    if (process.env.NODE_ENV === 'development') {
+      // 开发环境：从Vite服务器加载（使用不同端口或路由）
+      hudWindow.loadURL('http://localhost:5173/hud.html');
+    } else {
+      // 生产环境：从构建后的文件加载
+      hudWindow.loadFile(path.join(__dirname, '../dist/renderer/hud.html'));
+    }
 
     // 页面加载完成后再显示
     hudWindow.once('ready-to-show', () => {

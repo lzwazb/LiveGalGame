@@ -1,0 +1,246 @@
+:root {
+  font-family: 'Noto Sans SC', 'Segoe UI', system-ui, sans-serif;
+  color: #1f1d2b;
+}
+
+body {
+  margin: 0;
+  background: transparent;
+}
+
+#hud-root {
+  width: 100vw;
+  height: 100vh;
+}
+
+.hud-body {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}
+
+.hud-container {
+  width: 100%;
+  height: 100%;
+  padding: 18px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  background: rgba(255, 255, 255, 0.78);
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35), inset 0 0 40px rgba(255, 255, 255, 0.35);
+  backdrop-filter: blur(26px);
+}
+
+.hud-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.hud-drag-zone {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: grab;
+  user-select: none;
+}
+
+.hud-drag-zone.hud-dragging {
+  cursor: grabbing;
+}
+
+.hud-title {
+  font-weight: 600;
+  font-size: 15px;
+  color: #c51662;
+}
+
+.hud-controls {
+  display: flex;
+  gap: 10px;
+}
+
+.control-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(197, 22, 98, 0.12);
+  color: #c51662;
+  font-size: 20px;
+  cursor: pointer;
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.control-btn:hover {
+  background: rgba(197, 22, 98, 0.25);
+  transform: scale(1.08);
+}
+
+.status-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.hud-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-label {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #974e6e;
+}
+
+.transcript-area {
+  min-height: 140px;
+  max-height: 170px;
+  padding: 10px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.04);
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hud-status {
+  text-align: center;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 12px;
+  gap: 6px;
+  color: rgba(15, 23, 42, 0.85);
+}
+
+.hud-status-text {
+  font-size: 13px;
+}
+
+.hud-error {
+  color: #c51662;
+}
+
+.hud-spinner {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.5);
+  border-bottom-color: #c51662;
+  animation: spinner 0.9s linear infinite;
+  box-shadow: 0 0 12px rgba(197, 22, 98, 0.35);
+}
+
+@keyframes spinner {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.message-item {
+  display: flex;
+}
+
+.message-other {
+  justify-content: flex-start;
+}
+
+.message-user {
+  justify-content: flex-end;
+}
+
+.message-bubble {
+  max-width: 78%;
+  padding: 10px 14px;
+  border-radius: 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+  background: rgba(255, 255, 255, 0.9);
+  color: #111827;
+  box-shadow: 0 6px 16px rgba(17, 24, 39, 0.08);
+}
+
+.message-user .message-bubble {
+  background: rgba(197, 22, 98, 0.12);
+  color: #c51662;
+}
+
+.suggestions-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.suggestion-card {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(197, 22, 98, 0.1), rgba(142, 36, 170, 0.08));
+  border: 1px solid rgba(197, 22, 98, 0.3);
+  box-shadow: inset 0 0 12px rgba(255, 255, 255, 0.3);
+  transition: transform 0.2s ease;
+}
+
+.suggestion-card:hover {
+  transform: translateY(-2px);
+}
+
+.suggestion-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 6px;
+  color: #c51662;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.suggestion-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: rgba(15, 23, 42, 0.9);
+  margin: 0;
+}
+
+.suggestion-meta {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.suggestion-badge {
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.5);
+  color: #5b21b6;
+}
+

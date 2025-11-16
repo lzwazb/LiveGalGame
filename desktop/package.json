@@ -4,10 +4,16 @@
   "description": "LiveGalGame Desktop - 实时对话辅助与学习工具",
   "main": "src/main.js",
   "scripts": {
-    "dev": "electron . --enable-logging",
-    "build": "electron-builder",
-    "build:win": "electron-builder --win",
-    "build:mac": "electron-builder --mac"
+    "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron . --enable-logging\"",
+    "dev:vite": "vite",
+    "dev:electron": "electron . --enable-logging",
+    "build": "vite build && electron-builder",
+    "build:vite": "vite build",
+    "build:win": "vite build && electron-builder --win",
+    "build:mac": "vite build && electron-builder --mac",
+    "preview": "vite preview",
+    "start:prod": "vite build && cross-env NODE_ENV=production electron .",
+    "start:client": "vite build && cross-env NODE_ENV=production electron ."
   },
   "keywords": [
     "electron",
@@ -18,13 +24,26 @@
   "author": "LiveGalGame Team",
   "license": "MIT",
   "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.22",
+    "concurrently": "^9.1.0",
+    "cross-env": "^10.1.0",
     "electron": "^33.2.0",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.18",
+    "vite": "^6.0.5",
+    "wait-on": "^8.0.1"
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1",
     "electron-store": "^8.2.0",
-    "openai": "^6.9.0"
+    "openai": "^6.9.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0"
   },
   "build": {
     "appId": "com.livegalgame.desktop",
@@ -33,9 +52,11 @@
       "output": "dist"
     },
     "files": [
-      "src/**/*",
-      "assets/**/*",
-      "node_modules/**/*"
+      "dist/renderer/**/*",
+      "src/main.js",
+      "src/preload.js",
+      "src/db/**/*",
+      "package.json"
     ],
     "mac": {
       "category": "public.app-category.productivity"
