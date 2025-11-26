@@ -38,7 +38,48 @@ pnpm exec electron-builder install-app-deps
 *注意：此步骤对于 `better-sqlite3` 和 `sharp` 等原生模块在 Electron 中正常工作至关重要。如果遇到 `NODE_MODULE_VERSION` 不匹配的错误，请务必重新运行此命令。*
 
 ### 3. 配置语音识别 (ASR)
-本项目使用 `whisper.cpp` 进行本地高性能语音识别。
+
+本项目支持多种语音识别引擎，推荐使用 FunASR（阿里达摩院开源），也支持 whisper.cpp 作为备选。
+
+#### 方案一：FunASR（推荐）
+
+FunASR 是阿里巴巴达摩院开源的语音识别工具包，具有以下优势：
+- ✅ 优秀的中文识别效果
+- ✅ 支持多语言（中文、英文、粤语、日语、韩语等）
+- ✅ 支持实时语音识别
+- ✅ 内置 VAD（语音活动检测）和标点恢复
+- ✅ 模型自动下载，无需手动配置
+
+**安装步骤：**
+
+1. 确保已安装 Python 3.8 或更高版本：
+```bash
+python3 --version
+```
+
+2. 安装 FunASR：
+```bash
+npm run setup-funasr
+```
+
+3. 启动应用（会自动使用 FunASR）：
+```bash
+pnpm dev
+```
+
+**切换到 FunASR：**
+```bash
+# 临时切换
+WHISPER_IMPL=funasr pnpm dev
+
+# 或设置环境变量（持久）
+export WHISPER_IMPL=funasr
+pnpm dev
+```
+
+#### 方案二：Whisper.cpp（备选）
+
+如果您不想安装 Python 环境，可以使用 whisper.cpp：
 
 **对于 macOS (Apple Silicon)**: 预编译的二进制文件已包含在项目中，无需编译。
 
@@ -53,6 +94,17 @@ npm run setup-whisper-cpp
 npm run download-ggml-models
 ```
 *默认下载 `base` 模型（约 140MB）。模型文件将保存在 `models/` 目录下。*
+
+**切换到 Whisper.cpp：**
+```bash
+# 临时切换
+WHISPER_IMPL=cpp pnpm dev
+
+# 或设置环境变量（持久）
+export WHISPER_IMPL=cpp
+pnpm dev
+```
+
 
 ### 4. 启动开发环境
 ```bash
@@ -71,8 +123,10 @@ pnpm dev
 | `pnpm dev` | 启动开发环境 |
 | `pnpm build:mac` | 构建 macOS 应用 (.dmg) |
 | `pnpm build:win` | 构建 Windows 应用 (.exe) |
+| `npm run setup-funasr` | 安装 FunASR（推荐的ASR引擎） |
 | `npm run setup-whisper-cpp` | 编译 whisper.cpp 插件 |
-| `npm run download-ggml-models` | 下载 ASR 模型 |
+| `npm run download-ggml-models` | 下载 whisper.cpp 模型 |
+
 
 ## 故障排除
 

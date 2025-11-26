@@ -14,7 +14,7 @@ function ASRSettings() {
 
   // 表单数据
   const [formData, setFormData] = useState({
-    model_name: 'whisper-base',
+    model_name: 'ggml-whisper-large-zh-cv11-Q2_K.bin',
     language: 'zh',
     enable_vad: true,
     sentence_pause_threshold: 1.0,
@@ -27,7 +27,13 @@ function ASRSettings() {
   const modelOptions = [
     { value: 'whisper-tiny', label: 'Whisper Tiny (~75MB)', description: '最小模型，适合低端设备，准确率一般' },
     { value: 'whisper-base', label: 'Whisper Base (~150MB)', description: '平衡模型，推荐用于大多数设备' },
-    { value: 'whisper-small', label: 'Whisper Small (~500MB)', description: '较大模型，准确率更高，需要较好性能' }
+    { value: 'whisper-small', label: 'Whisper Small (~500MB)', description: '较大模型，准确率更高，需要较好性能' },
+    { value: 'ggml-whisper-large-zh-cv11-Q2_K.bin', label: 'Whisper Large ZH CV11 Q2_K (~529MB)', description: '中文优化大模型，Q2_K量化版本，适合中文语音识别，准确率高' },
+    { value: 'ggml-whisper-large-zh-cv11-Q3_K.bin', label: 'Whisper Large ZH CV11 Q3_K (~685MB)', description: '中文优化大模型，Q3_K量化版本，推荐使用，平衡准确率和性能' },
+    { value: 'ggml-whisper-large-zh-cv11-Q4_K.bin', label: 'Whisper Large ZH CV11 Q4_K (~889MB)', description: '中文优化大模型，Q4_K量化版本，高准确率' },
+    { value: 'ggml-whisper-large-zh-cv11-Q5_K.bin', label: 'Whisper Large ZH CV11 Q5_K (~1.08GB)', description: '中文优化大模型，Q5_K量化版本，更高准确率' },
+    { value: 'ggml-whisper-large-zh-cv11-Q6_K.bin', label: 'Whisper Large ZH CV11 Q6_K (~1.28GB)', description: '中文优化大模型，Q6_K量化版本，接近原始精度' },
+    { value: 'ggml-whisper-large-zh-cv11-Q8_0.bin', label: 'Whisper Large ZH CV11 Q8_0 (~1.66GB)', description: '中文优化大模型，Q8_0量化版本，最高精度' }
   ];
 
   // 语言选项
@@ -146,7 +152,7 @@ function ASRSettings() {
   // 重置表单
   const resetForm = () => {
     setFormData({
-      model_name: 'whisper-base',
+      model_name: 'ggml-whisper-large-zh-cv11-Q2_K.bin',
       language: 'zh',
       enable_vad: true,
       sentence_pause_threshold: 1.0,

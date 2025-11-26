@@ -34,3 +34,6 @@ whisper.cpp 使用 GGML 格式的模型，比 transformers.js 的模型更小：
 
 
 
+
+
+

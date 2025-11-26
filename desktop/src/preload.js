@@ -16,6 +16,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 平台信息
   platform: process.platform,
 
+  // electron-audio-loopback API（用于系统音频捕获）
+  enableLoopbackAudio: () => ipcRenderer.invoke('enable-loopback-audio'),
+  disableLoopbackAudio: () => ipcRenderer.invoke('disable-loopback-audio'),
+
   // IPC通信
   send: (channel, data) => ipcRenderer.send(channel, data),
   on: (channel, callback) => ipcRenderer.on(channel, (event, ...args) => callback(...args)),
@@ -76,6 +80,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ASR（语音识别）API
   asrInitialize: (conversationId) => ipcRenderer.invoke('asr-initialize', conversationId),
+  asrCheckReady: () => ipcRenderer.invoke('asr-check-ready'),
   asrStart: (conversationId) => ipcRenderer.invoke('asr-start', conversationId),
   asrStop: () => ipcRenderer.invoke('asr-stop'),
   asrGetConfigs: () => ipcRenderer.invoke('asr-get-configs'),
@@ -87,7 +92,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   asrUpdateAudioSource: (id, updates) => ipcRenderer.invoke('asr-update-audio-source', id, updates),
   asrGetSpeechRecords: (conversationId) => ipcRenderer.invoke('asr-get-speech-records', conversationId),
   asrConvertToMessage: (recordId, conversationId) => ipcRenderer.invoke('asr-convert-to-message', recordId, conversationId),
-  asrCleanupAudioFiles: (retentionDays) => ipcRenderer.invoke('asr-cleanup-audio-files', retentionDays)
+  asrCleanupAudioFiles: (retentionDays) => ipcRenderer.invoke('asr-cleanup-audio-files', retentionDays),
+
+  // Desktop Capturer API (用于系统音频捕获)
+  getDesktopSources: (options) => ipcRenderer.invoke('get-desktop-sources', options),
+
+  // 媒体权限 API (主要用于 macOS)
+  checkMediaAccessStatus: (mediaType) => ipcRenderer.invoke('check-media-access-status', mediaType),
+  requestMediaAccess: (mediaType) => ipcRenderer.invoke('request-media-access', mediaType),
+  checkScreenCaptureAccess: () => ipcRenderer.invoke('check-screen-capture-access')
 });
 
 // 监听主进程消息

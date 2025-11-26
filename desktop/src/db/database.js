@@ -8,19 +8,23 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 class DatabaseManager {
-  constructor() {
+  constructor(options = {}) {
     // 数据库文件路径
-    const dbPath = path.join(__dirname, '../../data/livegalgame.db');
+    const customPath = options.dbPath || process.env.LIVEGALGAME_DB_PATH;
+    const resolvedPath = customPath
+      ? path.resolve(customPath)
+      : path.join(__dirname, '../../data/livegalgame.db');
+    this.dbPath = resolvedPath;
 
     // 确保data目录存在
-    const dataDir = path.dirname(dbPath);
+    const dataDir = path.dirname(this.dbPath);
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
     }
 
     // 创建数据库连接
-    this.db = new Database(dbPath, {
-      verbose: process.env.NODE_ENV === 'development' ? console.log : null
+    this.db = new Database(this.dbPath, {
+      verbose: null // 关闭 SQL 语句打印，避免每次启动都输出数据库 schema
     });
 
     // 启用外键约束
@@ -29,7 +33,7 @@ class DatabaseManager {
     // 初始化数据库表
     this.initialize();
 
-    console.log('Database initialized at:', dbPath);
+    console.log('Database initialized at:', this.dbPath);
   }
 
   // 初始化数据库表
@@ -58,7 +62,10 @@ class DatabaseManager {
 
     // 初始化默认 ASR 配置（如果没有）
     this.seedDefaultASRConfig();
-    
+
+    // 修复 ASR 配置（迁移旧的/错误的模型名称）
+    this.fixASRConfig();
+
     // 初始化默认音频源（如果没有）
     this.seedDefaultAudioSources();
   }
@@ -242,8 +249,10 @@ class DatabaseManager {
       VALUES (@id, @conversation_id, @sender, @content, @timestamp, @is_ai_generated)
     `);
 
-    const info = stmt.run({
-      id: messageData.id || this.generateId(),
+    const messageId = messageData.id || this.generateId();
+
+    stmt.run({
+      id: messageId,
       conversation_id: messageData.conversation_id,
       sender: messageData.sender, // 'user' or 'character'
       content: messageData.content,
@@ -251,7 +260,7 @@ class DatabaseManager {
       is_ai_generated: messageData.is_ai_generated ? 1 : 0
     });
 
-    return this.getMessageById(messageData.id || info.lastInsertRowid);
+    return this.getMessageById(messageId);
   }
 
   // 获取对话的所有消息
@@ -275,7 +284,7 @@ class DatabaseManager {
   updateMessage(id, updates) {
     const allowedFields = ['content'];
     const updateFields = Object.keys(updates).filter(key => allowedFields.includes(key));
-    
+
     if (updateFields.length === 0) {
       return this.getMessageById(id);
     }
@@ -386,10 +395,10 @@ class DatabaseManager {
     const characterCount = this.db.prepare('SELECT COUNT(*) as count FROM characters').get().count;
     const conversationCount = this.db.prepare('SELECT COUNT(*) as count FROM conversations').get().count;
     const messageCount = this.db.prepare('SELECT COUNT(*) as count FROM messages').get().count;
-    
+
     // 计算平均好感度
     const avgAffinity = this.db.prepare('SELECT AVG(affinity) as avg FROM characters').get().avg || 0;
-    
+
     return {
       characterCount,
       conversationCount,
@@ -402,7 +411,7 @@ class DatabaseManager {
   getCharacterPageStatistics() {
     // 总计攻略对象
     const characterCount = this.db.prepare('SELECT COUNT(*) as count FROM characters').get().count;
-    
+
     // 活跃对话：两天内创建的新对话
     const twoDaysAgo = Date.now() - (2 * 24 * 60 * 60 * 1000);
     const activeConversationCount = this.db.prepare(`
@@ -410,10 +419,10 @@ class DatabaseManager {
       FROM conversations 
       WHERE created_at >= ?
     `).get(twoDaysAgo).count;
-    
+
     // 计算平均好感度
     const avgAffinity = this.db.prepare('SELECT AVG(affinity) as avg FROM characters').get().avg || 0;
-    
+
     return {
       characterCount,
       activeConversationCount,
@@ -533,22 +542,22 @@ class DatabaseManager {
   // 获取对话的完整AI分析数据
   getConversationAIData(conversationId) {
     console.log(`[DB] Getting AI data for conversation: ${conversationId}`);
-    
+
     // 获取分析报告
     const analysisReport = this.getConversationAnalysis(conversationId);
     console.log(`[DB] Analysis report found:`, analysisReport ? 'yes' : 'no');
-    
+
     // 获取关键时刻
     const keyMoments = this.getKeyMoments(conversationId);
     console.log(`[DB] Key moments found: ${keyMoments.length}`);
-    
+
     // 获取行动建议
     const actionSuggestions = this.getActionSuggestions(conversationId);
     console.log(`[DB] Action suggestions found: ${actionSuggestions.length}`);
-    
+
     // 获取对话信息以获取角色ID
     const conversation = this.getConversationById(conversationId);
-    
+
     // 获取本轮对话的表现态度分析（从ai_analysis表获取）
     let attitudeAnalysis = null;
     try {
@@ -590,7 +599,7 @@ class DatabaseManager {
     } catch (error) {
       console.error('Error getting attitude analysis:', error);
     }
-    
+
     // 解析分析报告
     let parsedReport = null;
     if (analysisReport && analysisReport.content) {
@@ -631,14 +640,14 @@ class DatabaseManager {
         tags: as.tags ? as.tags.split(',').map(t => t.trim()) : []
       }))
     };
-    
+
     console.log(`[DB] Returning AI data:`, {
       hasAnalysisReport: !!result.analysisReport,
       keyMomentsCount: result.keyMoments.length,
       hasAttitudeAnalysis: !!result.attitudeAnalysis,
       actionSuggestionsCount: result.actionSuggestions.length
     });
-    
+
     return result;
   }
 
@@ -649,7 +658,7 @@ class DatabaseManager {
     try {
       const stmt = this.db.prepare('SELECT * FROM character_details WHERE character_id = ?');
       const row = stmt.get(characterId);
-      
+
       if (!row) {
         // 如果没有详情记录，尝试从会话中生成
         return this.generateCharacterDetailsFromConversations(characterId);
@@ -677,7 +686,7 @@ class DatabaseManager {
     try {
       // 获取角色的所有对话
       const conversations = this.getConversationsByCharacter(characterId);
-      
+
       if (conversations.length === 0) {
         return {
           character_id: characterId,
@@ -700,15 +709,15 @@ class DatabaseManager {
       for (const conv of conversations) {
         const messages = this.getMessagesByConversation(conv.id);
         allMessages.push(...messages);
-        
+
         if (conv.summary) {
           allSummaries.push(conv.summary);
         }
-        
+
         if (conv.tags) {
           allTags.push(...conv.tags.split(',').map(t => t.trim()));
         }
-        
+
         if (conv.affinity_change) {
           affinityChanges.push(conv.affinity_change);
         }
@@ -869,8 +878,8 @@ class DatabaseManager {
   generateConversationSummary(conversations, summaries, affinityChanges) {
     const totalConversations = conversations.length;
     const totalAffinityChange = affinityChanges.reduce((sum, change) => sum + change, 0);
-    const avgAffinityChange = affinityChanges.length > 0 
-      ? Math.round(totalAffinityChange / affinityChanges.length) 
+    const avgAffinityChange = affinityChanges.length > 0
+      ? Math.round(totalAffinityChange / affinityChanges.length)
       : 0;
 
     let summary = `共进行了 ${totalConversations} 次对话。`;
@@ -961,9 +970,9 @@ class DatabaseManager {
     const conversationCount = this.db.prepare('SELECT COUNT(*) as count FROM conversations').get().count;
     const characterCount = this.db.prepare('SELECT COUNT(*) as count FROM characters').get().count;
     const aiAnalysisCount = this.db.prepare('SELECT COUNT(*) as count FROM ai_analysis').get().count;
-    
+
     console.log(`Current database state: ${characterCount} characters, ${conversationCount} conversations, ${aiAnalysisCount} AI analyses`);
-    
+
     // 如果对话数据已存在，检查是否需要插入AI分析数据
     if (conversationCount > 0) {
       // 如果AI分析数据不存在，只插入AI分析相关的数据
@@ -978,7 +987,7 @@ class DatabaseManager {
       }
       return;
     }
-    
+
     // 如果没有角色数据，需要先插入角色
     if (characterCount === 0) {
       console.log('No characters found, will insert all data including characters');
@@ -994,31 +1003,31 @@ class DatabaseManager {
       const seedPath = path.join(__dirname, 'seed.sql');
       if (fs.existsSync(seedPath)) {
         const seedSQL = fs.readFileSync(seedPath, 'utf-8');
-        
+
         // 改进SQL语句分割：先移除注释行，然后按分号分割
         const lines = seedSQL.split('\n');
         let cleanedLines = [];
         let inMultiLineStatement = false;
         let currentStatement = '';
-        
+
         for (let i = 0; i < lines.length; i++) {
           let line = lines[i].trim();
-          
+
           // 跳过空行和纯注释行
           if (!line || line.startsWith('--')) {
             continue;
           }
-          
+
           // 移除行内注释（-- 后面的内容）
           const commentIndex = line.indexOf('--');
           if (commentIndex >= 0) {
             line = line.substring(0, commentIndex).trim();
             if (!line) continue;
           }
-          
+
           // 累积到当前语句
           currentStatement += (currentStatement ? ' ' : '') + line;
-          
+
           // 如果行以分号结尾，说明语句完整
           if (line.endsWith(';')) {
             const statement = currentStatement.slice(0, -1).trim(); // 移除末尾的分号
@@ -1028,27 +1037,27 @@ class DatabaseManager {
             currentStatement = '';
           }
         }
-        
+
         // 处理最后可能没有分号的语句
         if (currentStatement.trim()) {
           cleanedLines.push(currentStatement.trim());
         }
-        
+
         console.log(`Found ${cleanedLines.length} SQL statements to execute`);
-        
+
         const transaction = this.db.transaction(() => {
           for (let i = 0; i < cleanedLines.length; i++) {
             const statement = cleanedLines[i];
-            
+
             // 如果角色数据已存在，跳过角色相关的INSERT语句
-            if (!needCharacters && statement.toUpperCase().includes('INSERT') && 
-                (statement.includes('INSERT INTO characters') || 
-                 statement.includes('INSERT INTO tags') || 
-                 statement.includes('INSERT INTO character_tags'))) {
+            if (!needCharacters && statement.toUpperCase().includes('INSERT') &&
+              (statement.includes('INSERT INTO characters') ||
+                statement.includes('INSERT INTO tags') ||
+                statement.includes('INSERT INTO character_tags'))) {
               console.log(`Skipping statement ${i + 1}: character data (already exists)`);
               continue;
             }
-            
+
             try {
               // 执行SQL语句（添加分号）
               this.db.exec(statement + ';');
@@ -1067,16 +1076,16 @@ class DatabaseManager {
             }
           }
         });
-        
+
         transaction();
         console.log('Sample data seeded successfully from SQL file');
-        
+
         // 验证数据插入
         const finalConvCount = this.db.prepare('SELECT COUNT(*) as count FROM conversations').get().count;
         const finalMsgCount = this.db.prepare('SELECT COUNT(*) as count FROM messages').get().count;
         const finalCharCount = this.db.prepare('SELECT COUNT(*) as count FROM characters').get().count;
         console.log(`Data verification: ${finalCharCount} characters, ${finalConvCount} conversations, ${finalMsgCount} messages`);
-        
+
         if (finalConvCount === 0) {
           console.warn('⚠️  Warning: No conversations were inserted!');
           console.warn('This might indicate a SQL parsing or execution issue.');
@@ -1098,7 +1107,7 @@ class DatabaseManager {
   // 创建或更新LLM配置
   saveLLMConfig(configData) {
     const now = Date.now();
-    
+
     // 如果设置为默认配置，先取消其他默认配置
     if (configData.is_default) {
       const clearDefaultStmt = this.db.prepare('UPDATE llm_configs SET is_default = 0 WHERE is_default = 1');
@@ -1198,7 +1207,7 @@ class DatabaseManager {
     try {
       // 动态导入openai（因为它是可选依赖）
       const { default: OpenAI } = await import('openai');
-      
+
       const config = {
         apiKey: configData.api_key,
       };
@@ -1216,7 +1225,7 @@ class DatabaseManager {
       return { success: true, message: '连接成功' };
     } catch (error) {
       console.error('LLM connection test failed:', error);
-      
+
       // 提供更友好的错误信息
       let errorMessage = '连接失败';
       if (error.status === 401) {
@@ -1234,7 +1243,7 @@ class DatabaseManager {
   // 只插入AI分析数据（当对话数据已存在但AI分析数据缺失时）
   seedAIDataOnly() {
     console.log('Seeding AI analysis data only...');
-    
+
     try {
       const seedPath = path.join(__dirname, 'seed.sql');
       if (!fs.existsSync(seedPath)) {
@@ -1246,22 +1255,22 @@ class DatabaseManager {
       const lines = seedSQL.split('\n');
       let cleanedLines = [];
       let currentStatement = '';
-      
+
       for (let i = 0; i < lines.length; i++) {
         let line = lines[i];
         const originalLine = line;
-        
+
         // 跳过空行
         if (!line.trim()) {
           continue;
         }
-        
+
         // 跳过纯注释行（整行都是注释）
         // 但如果currentStatement已经有内容，说明这是多行语句中的注释，应该跳过但不清空currentStatement
         if (line.trim().startsWith('--')) {
           continue; // 跳过注释行，但保留currentStatement
         }
-        
+
         // 移除行内注释（但保留SQL代码）
         const commentIndex = line.indexOf('--');
         if (commentIndex >= 0) {
@@ -1274,17 +1283,17 @@ class DatabaseManager {
             if (!line) continue;
           }
         }
-        
+
         line = line.trim();
         if (!line) continue;
-        
+
         // 累积到当前语句
         if (currentStatement) {
           currentStatement += ' ' + line;
         } else {
           currentStatement = line;
         }
-        
+
         // 如果行以分号结尾，说明语句完整
         if (line.endsWith(';')) {
           const statement = currentStatement.slice(0, -1).trim(); // 移除末尾的分号
@@ -1293,29 +1302,29 @@ class DatabaseManager {
             const upperStatement = statement.toUpperCase();
             const isAIAnalysis = upperStatement.includes('INSERT') && upperStatement.includes('AI_ANALYSIS');
             const isAISuggestions = upperStatement.includes('INSERT') && upperStatement.includes('AI_SUGGESTIONS');
-            
+
             if (isAIAnalysis || isAISuggestions) {
               cleanedLines.push(statement);
-              console.log(`[SQL Parser] Found AI statement (line ${i+1}): ${statement.substring(0, 150)}...`);
+              console.log(`[SQL Parser] Found AI statement (line ${i + 1}): ${statement.substring(0, 150)}...`);
             }
           }
           currentStatement = '';
         }
       }
-      
+
       if (currentStatement.trim()) {
         const statement = currentStatement.trim();
         const upperStatement = statement.toUpperCase();
-        if (upperStatement.includes('INSERT') && 
-            (upperStatement.includes('INSERT INTO AI_ANALYSIS') || 
-             upperStatement.includes('INSERT INTO AI_SUGGESTIONS'))) {
+        if (upperStatement.includes('INSERT') &&
+          (upperStatement.includes('INSERT INTO AI_ANALYSIS') ||
+            upperStatement.includes('INSERT INTO AI_SUGGESTIONS'))) {
           cleanedLines.push(statement);
           console.log(`[SQL Parser] Found AI statement (final): ${statement.substring(0, 100)}...`);
         }
       }
-      
+
       console.log(`Found ${cleanedLines.length} AI-related SQL statements to execute`);
-      
+
       // 如果没找到，打印一些调试信息
       if (cleanedLines.length === 0) {
         console.log('[SQL Parser] Debug: Checking seed.sql content...');
@@ -1323,7 +1332,7 @@ class DatabaseManager {
         const hasAIAnalysis = seedSQL.includes('INSERT') && seedSQL.includes('ai_analysis');
         const hasAISuggestions = seedSQL.includes('INSERT') && seedSQL.includes('ai_suggestions');
         console.log(`[SQL Parser] seed.sql contains ai_analysis: ${hasAIAnalysis}, ai_suggestions: ${hasAISuggestions}`);
-        
+
         // 尝试直接查找包含ai_analysis的行
         const lines = seedSQL.split('\n');
         let aiAnalysisLines = 0;
@@ -1334,17 +1343,17 @@ class DatabaseManager {
         }
         console.log(`[SQL Parser] Lines containing ai_analysis: ${aiAnalysisLines}, ai_suggestions: ${aiSuggestionLines}`);
       }
-      
+
       if (cleanedLines.length === 0) {
         console.log('No AI analysis data found in seed file');
         return;
       }
-      
+
       // 打印前几个语句用于调试
       if (cleanedLines.length > 0) {
         console.log('First statement preview:', cleanedLines[0].substring(0, 200) + '...');
       }
-      
+
       const transaction = this.db.transaction(() => {
         let successCount = 0;
         let errorCount = 0;
@@ -1370,15 +1379,15 @@ class DatabaseManager {
         }
         console.log(`AI data insertion summary: ${successCount} succeeded, ${errorCount} errors`);
       });
-      
+
       transaction();
-      
+
       // 验证数据插入
       const finalAICount = this.db.prepare('SELECT COUNT(*) as count FROM ai_analysis').get().count;
       const finalSuggestionCount = this.db.prepare('SELECT COUNT(*) as count FROM ai_suggestions').get().count;
       console.log(`AI data verification: ${finalAICount} AI analyses, ${finalSuggestionCount} AI suggestions`);
       console.log('✅ AI analysis data seeding completed successfully');
-      
+
     } catch (error) {
       console.error('Error seeding AI analysis data:', error);
       console.error(error.stack);
@@ -1754,7 +1763,7 @@ class DatabaseManager {
         console.log('No ASR config found, creating default config...');
 
         const defaultConfig = {
-          model_name: 'whisper-base',
+          model_name: 'medium',
           language: 'zh',
           enable_vad: 1,
           sentence_pause_threshold: 1.0,
@@ -1774,6 +1783,26 @@ class DatabaseManager {
     } catch (error) {
       console.error('Error seeding default ASR config:', error);
       return null;
+    }
+  }
+
+  // 修复 ASR 配置（迁移旧的/错误的模型名称）
+  fixASRConfig() {
+    try {
+      // 将 'base' 或旧的 whisper.cpp 模型名称更新为 'medium'
+      const stmt = this.db.prepare(`
+        UPDATE asr_configs 
+        SET model_name = 'medium', updated_at = ? 
+        WHERE model_name = 'base' OR model_name LIKE 'ggml%'
+      `);
+
+      const info = stmt.run(Date.now());
+
+      if (info.changes > 0) {
+        console.log(`Migrated ${info.changes} ASR configs to 'medium' model`);
+      }
+    } catch (error) {
+      console.error('Error fixing ASR config:', error);
     }
   }
 

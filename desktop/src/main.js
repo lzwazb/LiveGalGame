@@ -1,8 +1,29 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, screen, desktopCapturer, systemPreferences } from 'electron';
+import { initMain as initAudioLoopback } from 'electron-audio-loopback';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import DatabaseManager from './db/database.js';
 import ASRManager from './asr/asr-manager.js';
+
+// 初始化 electron-audio-loopback（必须在 app.whenReady 之前调用）
+initAudioLoopback();
+
+// ASR 管理器实例（延迟加载）- 必须在全局作用域定义
+let asrManager = null;
+let asrModelPreloading = false;
+let asrModelPreloaded = false;
+
+/**
+ * ASR事件发射器 - 向所有窗口发送ASR事件
+ * @param {string} eventName - 事件名称
+ * @param {any} data - 事件数据
+ */
+function emitASREvent(eventName, data) {
+  const windows = BrowserWindow.getAllWindows();
+  windows.forEach(window => {
+    window.webContents.send(eventName, data);
+  });
+}
 
 // 获取 __dirname 的 ESM 等效方式
 const __filename = fileURLToPath(import.meta.url);
@@ -25,6 +46,8 @@ function createWindow() {
       contextIsolation: true,
       enableRemoteModule: false,
       preload: path.join(__dirname, 'preload.js'),
+      // 启用系统音频捕获（macOS 需要）
+      enableWebAudio: true,
       // 禁用开发者工具快捷键（可选，如果需要可以注释掉）
       // devTools: false
     },
@@ -38,6 +61,9 @@ function createWindow() {
     // 禁用菜单栏（可选）
     autoHideMenuBar: true
   });
+
+  // 启用系统音频捕获权限
+  mainWindow.webContents.setAudioMuted(false);
 
   // 加载React应用
   if (process.env.NODE_ENV === 'development') {
@@ -68,15 +94,15 @@ function createWindow() {
   });
 
   // 监听来自渲染进程的IPC消息
-  setupIPC();
+  // setupIPC(); // 移至 app.whenReady() 中调用，避免重复注册
 }
 
 // 设置IPC通信
 function setupIPC() {
   // 显示HUD
-  ipcMain.on('show-hud', () => {
+  ipcMain.on('show-hud', async () => {
     if (!hudWindow) {
-      createHUDWindow();
+      await createHUDWindow();
     } else {
       hudWindow.show();
     }
@@ -496,14 +522,21 @@ function setupIPC() {
 
   // ========== ASR（语音识别）IPC处理器 ==========
 
-  // ASR 管理器实例（延迟加载）
-  let asrManager = null;
-
   // 初始化 ASR 管理器
   ipcMain.handle('asr-initialize', async (event, conversationId) => {
     try {
       if (!asrManager) {
         asrManager = new ASRManager();
+        asrManager.setEventEmitter(emitASREvent);
+      }
+      // 如果模型已经预加载，只需要设置conversationId并确保服务已启动
+      if (asrModelPreloaded && asrManager.isInitialized) {
+        asrManager.currentConversationId = conversationId;
+        // 确保ASR服务正在运行
+        if (!asrManager.isRunning) {
+          await asrManager.start(conversationId);
+        }
+        return true;
       }
       return await asrManager.initialize(conversationId);
     } catch (error) {
@@ -516,7 +549,17 @@ function setupIPC() {
   ipcMain.on('asr-audio-data', async (event, data) => {
     try {
       if (!asrManager) {
-        console.warn('ASRManager not initialized');
+        console.warn('[ASR] ASRManager not initialized, audio data ignored');
+        return;
+      }
+
+      if (!asrManager.isInitialized) {
+        console.warn('[ASR] ASRManager not initialized (isInitialized=false), audio data ignored');
+        return;
+      }
+
+      if (!asrManager.isRunning) {
+        console.warn('[ASR] ASRManager not running, audio data ignored');
         return;
       }
 
@@ -543,16 +586,73 @@ function setupIPC() {
     }
   });
 
+  // 检查 ASR 模型是否就绪
+  ipcMain.handle('asr-check-ready', async () => {
+    try {
+      // 如果正在预加载，返回加载中状态
+      if (asrModelPreloading) {
+        return {
+          ready: false,
+          message: 'ASR模型正在预加载中...',
+          preloading: true
+        };
+      }
+
+      // 如果已经预加载完成，检查是否初始化
+      if (asrModelPreloaded && asrManager && asrManager.isInitialized) {
+        return {
+          ready: true,
+          message: 'ASR模型已就绪',
+          preloaded: true
+        };
+      }
+
+      // 如果asrManager存在但未初始化，可能正在初始化
+      if (asrManager && !asrManager.isInitialized) {
+        return {
+          ready: false,
+          message: 'ASR模型正在初始化...',
+          initializing: true
+        };
+      }
+
+      // 如果asrManager不存在，说明还没开始加载
+      if (!asrManager) {
+        return {
+          ready: false,
+          message: 'ASR模型未加载，请稍候...',
+          notStarted: true
+        };
+      }
+
+      return {
+        ready: false,
+        message: 'ASR模型状态未知'
+      };
+    } catch (error) {
+      console.error('[ASR] Error checking ASR ready status:', error);
+      return {
+        ready: false,
+        message: `检查ASR状态失败: ${error.message}`,
+        error: true
+      };
+    }
+  });
+
   // 开始 ASR
   ipcMain.handle('asr-start', async (event, conversationId) => {
     try {
+      console.log(`[ASR] Starting ASR with conversationId: ${conversationId}`);
       if (!asrManager) {
+        console.log('[ASR] Creating new ASRManager instance');
         asrManager = new ASRManager();
+        asrManager.setEventEmitter(emitASREvent);
       }
       await asrManager.start(conversationId);
+      console.log('[ASR] ASR started successfully');
       return { success: true };
     } catch (error) {
-      console.error('Error starting ASR:', error);
+      console.error('[ASR] Error starting ASR:', error);
       throw error;
     }
   });
@@ -655,6 +755,7 @@ function setupIPC() {
     try {
       if (!asrManager) {
         asrManager = new ASRManager();
+        asrManager.setEventEmitter(emitASREvent);
       }
       return await asrManager.convertRecordToMessage(recordId, conversationId);
     } catch (error) {
@@ -668,6 +769,7 @@ function setupIPC() {
     try {
       if (!asrManager) {
         asrManager = new ASRManager();
+        asrManager.setEventEmitter(emitASREvent);
       }
       return asrManager.cleanupExpiredAudioFiles(retentionDays);
     } catch (error) {
@@ -677,25 +779,143 @@ function setupIPC() {
   });
 
   console.log('ASR IPC handlers registered');
+
+  // Desktop Capturer API (用于系统音频捕获)
+  ipcMain.handle('get-desktop-sources', async (event, options) => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: options?.types || ['screen', 'window'],
+        fetchWindowIcons: options?.fetchWindowIcons || false
+      });
+      return sources;
+    } catch (error) {
+      console.error('Error getting desktop sources:', error);
+      return [];
+    }
+  });
+
+  console.log('Desktop Capturer IPC handler registered');
+
+  // ========== 媒体权限 API (macOS) ==========
+  
+  // 检查媒体访问权限状态
+  ipcMain.handle('check-media-access-status', async (event, mediaType) => {
+    try {
+      // macOS 专用 API
+      if (process.platform === 'darwin') {
+        const status = systemPreferences.getMediaAccessStatus(mediaType);
+        console.log(`[Permission] ${mediaType} access status: ${status}`);
+        return { status, platform: 'darwin' };
+      }
+      // Windows/Linux 默认允许（需要用户在系统设置中授权）
+      return { status: 'granted', platform: process.platform };
+    } catch (error) {
+      console.error(`Error checking ${mediaType} access status:`, error);
+      return { status: 'unknown', error: error.message };
+    }
+  });
+
+  // 请求媒体访问权限 (macOS)
+  ipcMain.handle('request-media-access', async (event, mediaType) => {
+    try {
+      // macOS 专用 API
+      if (process.platform === 'darwin') {
+        // 先检查当前状态
+        const currentStatus = systemPreferences.getMediaAccessStatus(mediaType);
+        console.log(`[Permission] Current ${mediaType} status: ${currentStatus}`);
+        
+        if (currentStatus === 'granted') {
+          return { granted: true, status: 'granted' };
+        }
+        
+        if (currentStatus === 'denied') {
+          // 如果已被拒绝，无法再次请求，用户需要手动在系统偏好设置中开启
+          return { 
+            granted: false, 
+            status: 'denied',
+            message: '权限已被拒绝，请在系统偏好设置 > 安全性与隐私 > 隐私 中手动开启'
+          };
+        }
+        
+        // 请求权限
+        console.log(`[Permission] Requesting ${mediaType} access...`);
+        const granted = await systemPreferences.askForMediaAccess(mediaType);
+        console.log(`[Permission] ${mediaType} access ${granted ? 'granted' : 'denied'}`);
+        return { granted, status: granted ? 'granted' : 'denied' };
+      }
+      
+      // Windows/Linux 不需要显式请求
+      return { granted: true, status: 'granted', platform: process.platform };
+    } catch (error) {
+      console.error(`Error requesting ${mediaType} access:`, error);
+      return { granted: false, error: error.message };
+    }
+  });
+
+  // 检查屏幕录制权限 (macOS)
+  ipcMain.handle('check-screen-capture-access', async () => {
+    try {
+      if (process.platform === 'darwin') {
+        const status = systemPreferences.getMediaAccessStatus('screen');
+        console.log(`[Permission] Screen capture access status: ${status}`);
+        return { status, platform: 'darwin' };
+      }
+      return { status: 'granted', platform: process.platform };
+    } catch (error) {
+      console.error('Error checking screen capture access:', error);
+      return { status: 'unknown', error: error.message };
+    }
+  });
+
+  console.log('Media Permission IPC handlers registered');
 }
 
 // 创建HUD窗口
-function createHUDWindow() {
+async function createHUDWindow() {
   try {
+    // 检查ASR模型是否就绪，如果未就绪则等待
+    console.log('[HUD] 检查ASR模型状态...');
+    let checkAttempts = 0;
+    const maxAttempts = 120; // 最多等待12秒（120 * 100ms）
+
+    while (checkAttempts < maxAttempts) {
+      const status = await checkASRReady();
+      if (status.ready) {
+        console.log('[HUD] ASR模型已就绪:', status.message);
+        break;
+      }
+
+      if (checkAttempts === 0) {
+        console.log('[HUD] ASR模型未就绪，等待加载:', status.message);
+      } else if (checkAttempts % 10 === 0) {
+        // 每1秒输出一次状态
+        console.log(`[HUD] 等待ASR模型加载中... (${checkAttempts * 100}ms)`);
+      }
+
+      checkAttempts++;
+      await new Promise(resolve => setTimeout(resolve, 100)); // 等待100ms
+    }
+
+    if (checkAttempts >= maxAttempts) {
+      console.warn('[HUD] ASR模型加载超时，但继续创建HUD窗口');
+    } else {
+      console.log(`[HUD] ASR模型就绪，等待时间: ${checkAttempts * 100}ms`);
+    }
+
     const primaryDisplay = screen.getPrimaryDisplay();
     const { width, height } = primaryDisplay.workAreaSize;
 
     console.log(`Creating HUD window at position: ${width - 540}, ${height - 620}`);
 
     hudWindow = new BrowserWindow({
-      width: 520,
-      height: 600,
+      width: 600,
+      height: 700,
       minWidth: 400,
-      minHeight: 300,
+      minHeight: 400,
       maxWidth: 1200,
       maxHeight: 1000,
-      x: width - 540,
-      y: height - 620,
+      x: width - 620,
+      y: height - 720,
       frame: false,
       transparent: true,
       alwaysOnTop: true,
@@ -710,6 +930,9 @@ function createHUDWindow() {
       },
       title: 'LiveGalGame HUD'
     });
+
+    // 为 HUD 窗口启用系统音频捕获权限
+    hudWindow.webContents.setAudioMuted(false);
 
     // 初始化数据库
     if (!db) {
@@ -793,10 +1016,40 @@ function registerGlobalShortcuts() {
 }
 
 // 应用准备就绪
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  setupIPC(); // 确保IPC监听器只注册一次
+  
+  // macOS: 应用启动时请求麦克风权限
+  if (process.platform === 'darwin') {
+    try {
+      const micStatus = systemPreferences.getMediaAccessStatus('microphone');
+      console.log(`[Permission] Initial microphone status: ${micStatus}`);
+      
+      if (micStatus !== 'granted') {
+        console.log('[Permission] Requesting microphone access on startup...');
+        const granted = await systemPreferences.askForMediaAccess('microphone');
+        console.log(`[Permission] Microphone access ${granted ? 'granted' : 'denied'}`);
+      }
+      
+      // 检查屏幕录制权限状态（用于系统音频捕获）
+      const screenStatus = systemPreferences.getMediaAccessStatus('screen');
+      console.log(`[Permission] Screen capture status: ${screenStatus}`);
+      if (screenStatus !== 'granted') {
+        console.log('[Permission] 提示: 系统音频捕获需要屏幕录制权限，请在系统偏好设置中授权');
+      }
+    } catch (err) {
+      console.error('[Permission] Error requesting permissions:', err);
+    }
+  }
+  
   createWindow();
   // createHUDWindow(); // 暂时不自动创建HUD，等待用户触发
   registerGlobalShortcuts();
+
+  // 预加载ASR模型（后台进行，不阻塞UI）
+  preloadASRModel().catch(err => {
+    console.error('[ASR] 预加载失败，将在使用时加载:', err);
+  });
 
   // macOS上激活应用时创建窗口
   app.on('activate', () => {
@@ -819,5 +1072,77 @@ app.on('window-all-closed', () => {
     app.quit();
   }
 });
+
+// 预加载 ASR 模型（应用启动时）- 定义在全局作用域
+async function preloadASRModel() {
+  if (asrModelPreloading || asrModelPreloaded) {
+    return;
+  }
+
+  try {
+    asrModelPreloading = true;
+    console.log('[ASR] 开始预加载ASR模型...');
+
+    if (!asrManager) {
+      asrManager = new ASRManager();
+      asrManager.setEventEmitter(emitASREvent);
+    }
+
+    // 只初始化模型，不设置conversationId（因为还没有对话）
+    await asrManager.initialize(null);
+
+    asrModelPreloaded = true;
+    asrModelPreloading = false;
+    console.log('[ASR] ASR模型预加载完成');
+  } catch (error) {
+    console.error('[ASR] 预加载ASR模型失败:', error);
+    asrModelPreloading = false;
+    // 预加载失败不影响应用启动，后续使用时再加载
+  }
+}
+
+// 检查ASR模型是否就绪（在createHUDWindow中使用，需要定义在函数外部）
+async function checkASRReady() {
+  // 如果正在预加载，返回加载中状态
+  if (asrModelPreloading) {
+    return {
+      ready: false,
+      message: 'ASR模型正在预加载中...',
+      preloading: true
+    };
+  }
+
+  // 如果已经预加载完成，检查是否初始化
+  if (asrModelPreloaded && asrManager && asrManager.isInitialized) {
+    return {
+      ready: true,
+      message: 'ASR模型已就绪',
+      preloaded: true
+    };
+  }
+
+  // 如果asrManager存在但未初始化，可能正在初始化
+  if (asrManager && !asrManager.isInitialized) {
+    return {
+      ready: false,
+      message: 'ASR模型正在初始化...',
+      initializing: true
+    };
+  }
+
+  // 如果asrManager不存在，说明还没开始加载
+  if (!asrManager) {
+    return {
+      ready: false,
+      message: 'ASR模型未加载，请稍候...',
+      notStarted: true
+    };
+  }
+
+  return {
+    ready: false,
+    message: 'ASR模型状态未知'
+  };
+}
 
 console.log('LiveGalGame Desktop 启动成功！');

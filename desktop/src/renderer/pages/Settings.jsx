@@ -22,20 +22,26 @@ function Settings() {
   const [selectedSystemAudioDevice, setSelectedSystemAudioDevice] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [audioStatus, setAudioStatus] = useState('');
+  const [desktopCapturerError, setDesktopCapturerError] = useState(null);
   const [micVolumeLevel, setMicVolumeLevel] = useState(0);
   const [systemVolumeLevel, setSystemVolumeLevel] = useState(0);
   const [totalVolumeLevel, setTotalVolumeLevel] = useState(0);
-  const audioContextRef = useRef(null);
+  // 使用独立的 AudioContext 避免采样率冲突
+  const micAudioContextRef = useRef(null);
+  const systemAudioContextRef = useRef(null);
+  const audioContextRef = useRef(null); // 保留用于兼容性
   const micAnalyserRef = useRef(null);
   const systemAnalyserRef = useRef(null);
   const totalAnalyserRef = useRef(null);
   const microphoneRef = useRef(null);
   const systemAudioRef = useRef(null);
+  const systemAudioElementRef = useRef(null);
   const micDataArrayRef = useRef(null);
   const systemDataArrayRef = useRef(null);
   const totalDataArrayRef = useRef(null);
   const animationIdRef = useRef(null);
-  
+  const audioContextStateLogRef = useRef({ mic: null, system: null });
+
   // 音频源配置（从数据库加载）
   const [audioSources, setAudioSources] = useState([]);
   const [speaker1Source, setSpeaker1Source] = useState(null); // 用户（麦克风）
@@ -46,6 +52,61 @@ function Settings() {
   const [asrDefaultConfig, setAsrDefaultConfig] = useState(null);
   const [asrLoading, setAsrLoading] = useState(true);
   const [showAddAsrConfig, setShowAddAsrConfig] = useState(false);
+  const logAudioContextDetails = useCallback((context, label) => {
+    if (!context) {
+      console.warn(`[AudioDebug] ${label} AudioContext 不存在或已销毁`);
+      return;
+    }
+
+    const details = {
+      state: context.state,
+      sampleRate: context.sampleRate,
+      baseLatency: context.baseLatency ?? 'n/a',
+      outputLatency: context.outputLatency ?? 'n/a',
+      currentTime: Number(context.currentTime.toFixed(3))
+    };
+
+    console.log(`[AudioDebug] ${label} AudioContext 详情:`, details);
+  }, []);
+
+  const attachAudioContextDebugHandlers = useCallback((context, label) => {
+    if (!context) return;
+
+    const handler = () => {
+      const prevState = audioContextStateLogRef.current[label];
+      if (prevState !== context.state) {
+        console.log(`[AudioDebug] ${label} AudioContext 状态: ${context.state}`);
+        audioContextStateLogRef.current[label] = context.state;
+      }
+
+      if (context.state === 'suspended') {
+        console.warn(`[AudioDebug] ${label} AudioContext 已暂停，尝试恢复...`);
+      } else if (context.state === 'closed') {
+        console.warn(`[AudioDebug] ${label} AudioContext 已关闭`);
+      }
+    };
+
+    context.onstatechange = handler;
+    logAudioContextDetails(context, label);
+  }, [logAudioContextDetails]);
+
+  useEffect(() => {
+    const handleWindowError = (event) => {
+      if (event?.message?.includes('AudioContext')) {
+        console.error('[AudioDebug] 捕获到全局 AudioContext 错误:', event.message, event.error);
+        logAudioContextDetails(micAudioContextRef.current, '麦克风');
+        logAudioContextDetails(systemAudioContextRef.current, '系统音频');
+
+        setAudioStatus(prev => {
+          const prefix = prev && !prev.includes('AudioContext 错误') ? `${prev} | ` : '';
+          return `${prefix}AudioContext 错误: ${event.message}`;
+        });
+      }
+    };
+
+    window.addEventListener('error', handleWindowError);
+    return () => window.removeEventListener('error', handleWindowError);
+  }, [logAudioContextDetails]);
   const [newAsrConfig, setNewAsrConfig] = useState({
     model_name: 'whisper-base',
     language: 'zh',
@@ -177,7 +238,7 @@ function Settings() {
       return () => clearTimeout(timer);
     }
   }, [selectedAudioDevice, selectedSystemAudioDevice, audioDevices, speaker1Source, speaker2Source, captureSystemAudio]);
-  
+
   // 当 speaker1Source 或 speaker2Source 更新时，重置自动保存标志
   useEffect(() => {
     if (speaker1Source) {
@@ -243,97 +304,212 @@ function Settings() {
 
   const startListening = async () => {
     try {
-      setAudioStatus('正在请求麦克风权限...');
+      // 停止之前的监听（如果有）并等待清理完成
+      await stopListening();
 
-      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      // 额外等待一小段时间确保浏览器音频子系统完全释放
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      setAudioStatus('正在检查权限...');
+      setDesktopCapturerError(null);
+
+      // macOS: 先检查并请求麦克风权限
+      if (window.electronAPI?.checkMediaAccessStatus) {
+        const micStatus = await window.electronAPI.checkMediaAccessStatus('microphone');
+        console.log('[Settings] 麦克风权限状态:', micStatus);
+        
+        if (micStatus.status !== 'granted') {
+          setAudioStatus('正在请求麦克风权限...');
+          const result = await window.electronAPI.requestMediaAccess('microphone');
+          console.log('[Settings] 麦克风权限请求结果:', result);
+          
+          if (!result.granted) {
+            throw new Error(result.message || '麦克风权限被拒绝，请在系统设置中允许');
+          }
+        }
+      }
+
+      setAudioStatus('正在初始化音频...');
 
       let sourceCount = 0;
+      let micStreamObtained = false;
 
-      // 1. 捕获麦克风音频并创建独立分析器
-      const micAnalyser = audioContextRef.current.createAnalyser();
-      micAnalyser.fftSize = 256;
-      micAnalyser.smoothingTimeConstant = 0.8;
-      micAnalyserRef.current = micAnalyser;
-      micDataArrayRef.current = new Uint8Array(micAnalyser.frequencyBinCount);
+      // 1. 捕获麦克风音频 - 使用独立的 AudioContext
+      setAudioStatus('正在获取麦克风...');
+      try {
+        // 为麦克风创建独立的 AudioContext，强制使用 48kHz 采样率以减少冲突
+        const audioContextOptions = { sampleRate: 48000, latencyHint: 'playback' };
+        micAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)(audioContextOptions);
+        attachAudioContextDebugHandlers(micAudioContextRef.current, 'mic');
 
-      const micConstraints = {
-        audio: {
-          deviceId: selectedAudioDevice ? { exact: selectedAudioDevice } : undefined,
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: 44100
+        const micAnalyser = micAudioContextRef.current.createAnalyser();
+        micAnalyser.fftSize = 256;
+        micAnalyser.smoothingTimeConstant = 0.8;
+        micAnalyserRef.current = micAnalyser;
+        micDataArrayRef.current = new Uint8Array(micAnalyser.frequencyBinCount);
+
+        const micConstraints = {
+          audio: {
+            deviceId: selectedAudioDevice ? { exact: selectedAudioDevice } : undefined,
+            echoCancellation: true,
+            noiseSuppression: true
+          }
+        };
+
+        const micStream = await navigator.mediaDevices.getUserMedia(micConstraints);
+        microphoneRef.current = micStream;
+
+        const micSource = micAudioContextRef.current.createMediaStreamSource(micStream);
+        micSource.connect(micAnalyser);
+        sourceCount++;
+        micStreamObtained = true;
+        console.log('[Settings] ✅ 麦克风捕获成功');
+      } catch (micError) {
+        console.error('[Settings] ❌ 麦克风捕获失败:', micError);
+        // 麦克风捕获失败时，如果也要捕获系统音频，继续执行；否则抛出错误
+        if (!captureSystemAudio) {
+          throw micError;
         }
-      };
+        setAudioStatus(`⚠️ 麦克风捕获失败: ${micError.message}，尝试捕获系统音频...`);
+      }
 
-      const micStream = await navigator.mediaDevices.getUserMedia(micConstraints);
-      microphoneRef.current = micStream;
-
-      const micSource = audioContextRef.current.createMediaStreamSource(micStream);
-      micSource.connect(micAnalyser);
-      sourceCount++;
-
-      // 2. 如果启用了系统音频捕获，创建第二个独立分析器
+      // 2. 如果启用了系统音频捕获，使用 electron-audio-loopback
       if (captureSystemAudio) {
-        setAudioStatus('正在请求系统音频权限...');
+        setAudioStatus('正在尝试捕获系统音频...');
+        console.log('[Settings] 系统音频捕获: 使用 electron-audio-loopback...');
 
-        const systemAnalyser = audioContextRef.current.createAnalyser();
+        // 为系统音频创建独立的 AudioContext
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        const sysAudioContextOptions = { sampleRate: 48000, latencyHint: 'playback' };
+        systemAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)(sysAudioContextOptions);
+        
+        attachAudioContextDebugHandlers(systemAudioContextRef.current, 'system');
+
+        const systemAnalyser = systemAudioContextRef.current.createAnalyser();
         systemAnalyser.fftSize = 256;
         systemAnalyser.smoothingTimeConstant = 0.8;
         systemAnalyserRef.current = systemAnalyser;
         systemDataArrayRef.current = new Uint8Array(systemAnalyser.frequencyBinCount);
 
-        const systemConstraints = {
-          audio: {
-            deviceId: selectedSystemAudioDevice ? { exact: selectedSystemAudioDevice } : undefined,
-            echoCancellation: false,
-            noiseSuppression: false,
-            sampleRate: 44100
-          }
-        };
-
         try {
-          const systemStream = await navigator.mediaDevices.getUserMedia(systemConstraints);
-          systemAudioRef.current = systemStream;
+          // 使用 electron-audio-loopback 方案
+          // 1. 启用 loopback 音频
+          if (window.electronAPI?.enableLoopbackAudio) {
+            await window.electronAPI.enableLoopbackAudio();
+            console.log('[Settings] Loopback audio enabled');
+          }
 
-          const systemSource = audioContextRef.current.createMediaStreamSource(systemStream);
-          systemSource.connect(systemAnalyser);
-          sourceCount++;
+          // 2. 使用 getDisplayMedia 获取系统音频
+          setAudioStatus('正在获取系统音频...');
+          const displayStream = await navigator.mediaDevices.getDisplayMedia({
+            audio: true,
+            video: true
+          });
+
+          // 3. 禁用 loopback 音频
+          if (window.electronAPI?.disableLoopbackAudio) {
+            await window.electronAPI.disableLoopbackAudio();
+            console.log('[Settings] Loopback audio disabled');
+          }
+
+          // 4. 停止视频轨道
+          const videoTracks = displayStream.getVideoTracks();
+          videoTracks.forEach(track => {
+            track.stop();
+            displayStream.removeTrack(track);
+            console.log(`[Settings] Video track stopped: ${track.label}`);
+          });
+
+          // 5. 检查音频轨道
+          const audioTracks = displayStream.getAudioTracks();
+          console.log(`[Settings] 系统音频流: ${audioTracks.length} 个音频轨道`);
+
+          if (audioTracks.length > 0) {
+            systemAudioRef.current = displayStream;
+
+            const systemSource = systemAudioContextRef.current.createMediaStreamSource(displayStream);
+            systemSource.connect(systemAnalyser);
+            sourceCount++;
+
+            if (systemAudioContextRef.current.state === 'suspended') {
+              await systemAudioContextRef.current.resume();
+            }
+
+            console.log(`[Settings] ✅ 系统音频捕获已启动 (electron-audio-loopback)`);
+            setAudioStatus('✅ 系统音频捕获成功');
+            setDesktopCapturerError(null);
+          } else {
+            console.warn(`[Settings] ⚠️ 没有音频轨道`);
+            displayStream.getTracks().forEach(track => track.stop());
+            setDesktopCapturerError('没有音频轨道');
+          }
         } catch (systemError) {
-          console.warn('系统音频捕获失败:', systemError);
-          setAudioStatus(`系统音频捕获失败: ${systemError.message}`);
+          console.error('[Settings] ❌ 系统音频捕获失败:', systemError);
+          
+          // 确保禁用 loopback
+          if (window.electronAPI?.disableLoopbackAudio) {
+            await window.electronAPI.disableLoopbackAudio().catch(() => {});
+          }
+          
+          const errorMsg = systemError.message || '未知错误';
+          if (micStreamObtained) {
+            console.warn(`[Settings] 麦克风将继续工作，但无法捕获系统音频`);
+          }
+          setDesktopCapturerError(`捕获失败: ${errorMsg}`);
         }
       }
 
-      // 3. 创建总计分析器（用于显示总体音量）
-      const totalAnalyser = audioContextRef.current.createAnalyser();
-      totalAnalyser.fftSize = 256;
-      totalAnalyser.smoothingTimeConstant = 0.8;
-      totalAnalyserRef.current = totalAnalyser;
-      totalDataArrayRef.current = new Uint8Array(totalAnalyser.frequencyBinCount);
-
-      // 将麦克风和系统音频都连接到总计分析器
-      if (microphoneRef.current) {
-        const micSource = audioContextRef.current.createMediaStreamSource(microphoneRef.current);
-        micSource.connect(totalAnalyser);
-      }
-      if (systemAudioRef.current) {
-        const systemSource = audioContextRef.current.createMediaStreamSource(systemAudioRef.current);
-        systemSource.connect(totalAnalyser);
+      // 检查是否至少有一个音频源成功捕获
+      if (sourceCount === 0) {
+        throw new Error('没有成功捕获任何音频源。请检查设备连接和权限设置。');
       }
 
-      setAudioStatus(`正在监听 (${sourceCount}个音频源)...`);
+      // 3. 总计音量将在 analyzeAudio 中通过软件方式计算（两个独立 AudioContext 的平均值）
+      // 不再使用硬件合并，因为两个 AudioContext 无法直接连接
+      totalDataArrayRef.current = new Uint8Array(128); // 用于存储计算后的总音量数据
+
+      // 构建状态信息
+      const capturedSources = [];
+      if (micStreamObtained) capturedSources.push('麦克风');
+      if (systemAudioRef.current) capturedSources.push('系统音频');
+      
+      const statusMsg = capturedSources.length > 0 
+        ? `正在监听 (${capturedSources.join(' + ')})...`
+        : '监听中...';
+      
+      setAudioStatus(statusMsg);
       setIsListening(true);
+
+      console.log(`[Settings] ✅ 音频监听已启动: ${capturedSources.join(', ') || '无'}`);
 
       analyzeAudio();
 
     } catch (error) {
       console.error('启动监听失败:', error);
-      setAudioStatus(`启动失败: ${error.message}`);
+      console.error('错误名称:', error.name);
+      console.error('错误消息:', error.message);
+      console.error('错误堆栈:', error.stack);
+      
+      // 针对常见错误提供更友好的提示
+      let errorMsg = error.message;
+      if (error.name === 'NotFoundError') {
+        errorMsg = '未找到音频设备。请检查麦克风是否正确连接，或尝试选择其他设备。';
+      } else if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+        errorMsg = '音频权限被拒绝。请在系统设置中允许此应用访问麦克风。';
+      } else if (error.name === 'NotReadableError') {
+        errorMsg = '无法读取音频设备。设备可能被其他应用占用。';
+      }
+      
+      setAudioStatus(`启动失败: ${errorMsg}`);
       setIsListening(false);
+      
+      // 清理可能部分创建的资源
+      await stopListening();
     }
   };
 
-  const stopListening = () => {
+  const stopListening = async () => {
     if (animationIdRef.current) {
       cancelAnimationFrame(animationIdRef.current);
       animationIdRef.current = null;
@@ -349,59 +525,114 @@ function Settings() {
       systemAudioRef.current = null;
     }
 
+    if (systemAudioElementRef.current) {
+      systemAudioElementRef.current.pause();
+      systemAudioElementRef.current.srcObject = null;
+      systemAudioElementRef.current = null;
+    }
+
+    // 关闭麦克风的 AudioContext
+    if (micAudioContextRef.current) {
+      micAudioContextRef.current.onstatechange = null;
+      try {
+        if (micAudioContextRef.current.state !== 'closed') {
+          await micAudioContextRef.current.close();
+        }
+      } catch (e) {
+        console.warn('关闭麦克风 AudioContext 时出错:', e);
+      }
+      micAudioContextRef.current = null;
+    }
+
+    // 关闭系统音频的 AudioContext
+    if (systemAudioContextRef.current) {
+      systemAudioContextRef.current.onstatechange = null;
+      try {
+        if (systemAudioContextRef.current.state !== 'closed') {
+          await systemAudioContextRef.current.close();
+        }
+      } catch (e) {
+        console.warn('关闭系统音频 AudioContext 时出错:', e);
+      }
+      systemAudioContextRef.current = null;
+    }
+
+    // 兼容性：清理旧的 audioContextRef
     if (audioContextRef.current) {
-      audioContextRef.current.close();
+      try {
+        if (audioContextRef.current.state !== 'closed') {
+          await audioContextRef.current.close();
+        }
+      } catch (e) {
+        console.warn('关闭 AudioContext 时出错:', e);
+      }
       audioContextRef.current = null;
     }
 
+    // 清理分析器引用
+    micAnalyserRef.current = null;
+    systemAnalyserRef.current = null;
+    totalAnalyserRef.current = null;
+    audioContextStateLogRef.current = { mic: null, system: null };
+
     setIsListening(false);
     setAudioStatus('监听已停止');
-    setVolumeLevel(0);
+    setMicVolumeLevel(0);
+    setSystemVolumeLevel(0);
+    setTotalVolumeLevel(0);
   };
 
   const analyzeAudio = () => {
+    // 检查是否至少有一个 AudioContext 在运行
+    const micContextActive = micAudioContextRef.current && micAudioContextRef.current.state !== 'closed';
+    const systemContextActive = systemAudioContextRef.current && systemAudioContextRef.current.state !== 'closed';
+    
+    if (!micContextActive && !systemContextActive) {
+      return;
+    }
+
     let hasMic = false;
     let hasSystem = false;
-    let hasTotal = false;
+    let micVolume = 0;
+    let systemVolume = 0;
 
     // 分析麦克风音量
-    if (micAnalyserRef.current && micDataArrayRef.current) {
-      micAnalyserRef.current.getByteFrequencyData(micDataArrayRef.current);
-      let micSum = 0;
-      for (let i = 0; i < micDataArrayRef.current.length; i++) {
-        micSum += micDataArrayRef.current[i];
+    if (micAnalyserRef.current && micDataArrayRef.current && micContextActive) {
+      try {
+        micAnalyserRef.current.getByteFrequencyData(micDataArrayRef.current);
+        let micSum = 0;
+        for (let i = 0; i < micDataArrayRef.current.length; i++) {
+          micSum += micDataArrayRef.current[i];
+        }
+        const micAverage = micSum / micDataArrayRef.current.length;
+        micVolume = Math.min(100, (micAverage / 255) * 100);
+        setMicVolumeLevel(micVolume);
+        hasMic = micVolume > 2;
+      } catch (e) {
+        console.warn('[Settings] 分析麦克风音量时出错:', e);
       }
-      const micAverage = micSum / micDataArrayRef.current.length;
-      const micVolume = Math.min(100, (micAverage / 255) * 100);
-      setMicVolumeLevel(micVolume);
-      hasMic = micVolume > 2;
     }
 
     // 分析系统音频音量
-    if (systemAnalyserRef.current && systemDataArrayRef.current) {
-      systemAnalyserRef.current.getByteFrequencyData(systemDataArrayRef.current);
-      let systemSum = 0;
-      for (let i = 0; i < systemDataArrayRef.current.length; i++) {
-        systemSum += systemDataArrayRef.current[i];
+    if (systemAnalyserRef.current && systemDataArrayRef.current && systemContextActive) {
+      try {
+        systemAnalyserRef.current.getByteFrequencyData(systemDataArrayRef.current);
+        let systemSum = 0;
+        for (let i = 0; i < systemDataArrayRef.current.length; i++) {
+          systemSum += systemDataArrayRef.current[i];
+        }
+        const systemAverage = systemSum / systemDataArrayRef.current.length;
+        systemVolume = Math.min(100, (systemAverage / 255) * 100);
+        setSystemVolumeLevel(systemVolume);
+        hasSystem = systemVolume > 2;
+      } catch (e) {
+        console.warn('[Settings] 分析系统音频音量时出错:', e);
       }
-      const systemAverage = systemSum / systemDataArrayRef.current.length;
-      const systemVolume = Math.min(100, (systemAverage / 255) * 100);
-      setSystemVolumeLevel(systemVolume);
-      hasSystem = systemVolume > 2;
     }
 
-    // 分析总体音量（混合后的音频）
-    if (totalAnalyserRef.current && totalDataArrayRef.current) {
-      totalAnalyserRef.current.getByteFrequencyData(totalDataArrayRef.current);
-      let totalSum = 0;
-      for (let i = 0; i < totalDataArrayRef.current.length; i++) {
-        totalSum += totalDataArrayRef.current[i];
-      }
-      const totalAverage = totalSum / totalDataArrayRef.current.length;
-      const totalVolume = Math.min(100, (totalAverage / 255) * 100);
-      setTotalVolumeLevel(totalVolume);
-      hasTotal = totalVolume > 2;
-    }
+    // 计算总体音量（两个音源的最大值，而不是平均值，以便更好地显示活动）
+    const totalVolume = Math.max(micVolume, systemVolume);
+    setTotalVolumeLevel(totalVolume);
 
     // 更新状态文本
     let statusText = '正在监听';
@@ -535,11 +766,10 @@ function Settings() {
                   {llmConfigs.map((config) => (
                     <div
                       key={config.id}
-                      className={`p-4 rounded-lg border ${
-                        defaultConfig?.id === config.id
-                          ? 'border-primary bg-primary/5'
-                          : 'border-border-light dark:border-border-dark'
-                      }`}
+                      className={`p-4 rounded-lg border ${defaultConfig?.id === config.id
+                        ? 'border-primary bg-primary/5'
+                        : 'border-border-light dark:border-border-dark'
+                        }`}
                     >
                       <div className="flex items-center justify-between">
                         <div>
@@ -741,14 +971,10 @@ function Settings() {
                       if (speaker2Source && speaker2Source.device_id) {
                         await saveAudioSource('角色（系统音频）', speaker2Source.device_id, speaker2Source.device_name, false);
                       }
+                      setDesktopCapturerError(null);
                     } else {
-                      // 如果勾选，但还没有选择设备，提示用户选择设备
-                      if (!selectedSystemAudioDevice && audioDevices.length > 0) {
-                        setSelectedSystemAudioDevice(audioDevices[0].deviceId);
-                        const device = audioDevices[0];
-                        await saveAudioSource('角色（系统音频）', device.deviceId, device.label || device.deviceId, true);
-                      } else if (speaker2Source && speaker2Source.device_id) {
-                        // 如果之前有配置，恢复启用
+                      // 如果勾选，且之前有配置，恢复启用
+                      if (speaker2Source && speaker2Source.device_id) {
                         await saveAudioSource('角色（系统音频）', speaker2Source.device_id, speaker2Source.device_name, true);
                       }
                     }
@@ -756,69 +982,9 @@ function Settings() {
                   className="w-4 h-4 text-primary border-border-light dark:border-border-dark rounded focus:ring-primary"
                 />
                 <label htmlFor="systemAudio" className="text-sm text-text-light dark:text-text-dark">
-                  同时捕获系统音频（角色音频）*
+                  同时捕获系统音频（角色音频）
                 </label>
               </div>
-              {captureSystemAudio && (
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-sm font-medium text-text-light dark:text-text-dark mb-2">
-                      角色（系统音频）设备 *
-                    </label>
-                    <select
-                      value={selectedSystemAudioDevice}
-                      onChange={async (e) => {
-                        const deviceId = e.target.value;
-                        setSelectedSystemAudioDevice(deviceId);
-                        const device = audioDevices.find(d => d.deviceId === deviceId);
-                        if (device) {
-                          await saveAudioSource('角色（系统音频）', deviceId, device.label || device.deviceId, true);
-                        }
-                      }}
-                      className="w-full px-3 py-2 border border-border-light dark:border-border-dark rounded-lg bg-surface-light dark:bg-surface-dark text-text-light dark:text-text-dark focus:outline-none focus:ring-2 focus:ring-primary/50"
-                    >
-                      {audioDevices.map((device) => (
-                        <option key={device.deviceId} value={device.deviceId}>
-                          {device.label || `音频设备 ${device.deviceId.substring(0, 8)}`}
-                        </option>
-                      ))}
-                    </select>
-                    <p className="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">
-                      选择虚拟音频设备（用于识别角色/游戏音频）
-                    </p>
-                    {speaker2Source && (
-                      <p className="text-xs text-green-600 dark:text-green-400 mt-1">
-                        ✓ 已保存配置
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="text-xs text-yellow-600 dark:text-yellow-400 p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg border border-yellow-200 dark:border-yellow-800">
-                    <p className="font-medium mb-2 flex items-center gap-1">
-                      <span>💡</span> 什么是虚拟音频设备？
-                    </p>
-                    <div className="space-y-2">
-                      <p><strong>简单来说：</strong>虚拟音频设备是一个"假"的音频设备，让电脑以为有个真实的麦克风，但实际上这个麦克风接收到的是系统播放的声音。</p>
-                      <div className="bg-white dark:bg-gray-800 p-2 rounded border border-yellow-200 dark:border-yellow-800">
-                        <p className="font-medium mb-1">使用场景示例：</p>
-                        <p>• 录制游戏时的背景音乐和音效</p>
-                        <p>• 录制视频通话时对方的声音</p>
-                        <p>• 同时录制麦克风说话声和电脑播放的音乐</p>
-                      </div>
-                      <div>
-                        <p className="font-medium">安装步骤：</p>
-                        <ul className="list-disc ml-5 mt-1 space-y-1">
-                          <li><strong>Mac用户：</strong> 下载安装 BlackHole（免费软件）</li>
-                          <li><strong>Windows用户：</strong> 下载安装 VB-Audio Virtual Cable（免费软件）</li>
-                          <li><strong>步骤1：</strong> 安装后，打开系统设置 → 声音 → 输出，选择虚拟设备</li>
-                          <li><strong>步骤2：</strong> 在本应用中选择虚拟设备作为麦克风</li>
-                          <li><strong>步骤3：</strong> 现在应用就能"听到"电脑播放的所有声音了</li>
-                        </ul>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
 
               <div className="border-t border-border-light dark:border-border-dark pt-4">
                 <h3 className="text-sm font-medium text-text-light dark:text-text-dark mb-3">
@@ -847,9 +1013,25 @@ function Settings() {
 
                   {isListening && (
                     <div className="space-y-3">
-                      <div className="text-sm text-text-muted-light dark:text-text-muted-dark">
+                      <div className={`text-sm font-medium ${audioStatus.includes('✅') ? 'text-green-600 dark:text-green-400' :
+                        audioStatus.includes('⚠️') || audioStatus.includes('❌') ? 'text-red-600 dark:text-red-400' :
+                          'text-text-muted-light dark:text-text-muted-dark'
+                        }`}>
                         {audioStatus}
                       </div>
+
+                      {desktopCapturerError && (
+                        <div className="text-xs text-orange-600 dark:text-orange-400 bg-orange-50 dark:bg-orange-900/20 p-2 rounded border border-orange-200 dark:border-orange-800">
+                          <p className="font-medium flex items-center gap-1">
+                            <span className="material-symbols-outlined text-sm">warning</span>
+                            原生屏幕音频捕获失败
+                          </p>
+                          <p className="mt-1 opacity-90">{desktopCapturerError}</p>
+                          <p className="mt-1 opacity-80 border-t border-orange-200 dark:border-orange-800 pt-1">
+                            自动捕获系统音频失败。请检查系统权限或驱动。
+                          </p>
+                        </div>
+                      )}
 
                       <div className="space-y-2">
                         <div className="flex items-center gap-3">
