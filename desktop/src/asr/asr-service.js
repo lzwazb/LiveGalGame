@@ -12,6 +12,14 @@ const DEFAULT_WLK_HOST = '127.0.0.1';
 const DEFAULT_WLK_PORT = Number(process.env.WHISPERLIVEKIT_PORT || 18765);
 const PCM_SAMPLE_RATE = 16000;
 const MAX_LINE_HISTORY = 200;
+const DEFAULT_SILENCE_THRESHOLD_SECONDS = Number(process.env.WHISPERLIVEKIT_SILENCE_THRESHOLD || 0.6);
+const DEFAULT_MAX_SENTENCE_CHARS = Number(process.env.WHISPERLIVEKIT_MAX_SENTENCE_CHARS || 50);
+
+// 句子级标点和启发式配置（主要面向中文）
+const SENTENCE_END_PUNCTUATION = new Set('。！？!?；;');
+const CLAUSE_PUNCTUATION = new Set('，,、：:');
+const QUESTION_SUFFIXES = new Set(['吗', '么', '呢', '?', '？']);
+const EXCLAMATION_SUFFIXES = new Set(['啊', '呀', '！', '!']);
 
 function float32ToInt16Buffer(floatArray) {
   const int16Array = new Int16Array(floatArray.length);
@@ -31,6 +39,181 @@ function parseClockToSeconds(clock) {
   return parts.reduce((acc, part) => acc * 60 + part, 0);
 }
 
+/**
+ * 文本分句器（仅在 WhisperLiveKit 流水线中使用）
+ *
+ * - 在客户端维护一个原始文本缓冲区（rawBuffer），按时间间隔和长度做启发式断句
+ * - 只依赖后端给出的 text/start/end，不修改 ASR 服务器行为
+ * - 返回值中同时包含：
+ *   - text: 用于 UI 展示的带标点句子
+ *   - rawLength: 该句在原始缓冲区中消耗的字符数（不包含我们补的标点）
+ */
+class TextSegmenter {
+  constructor(config = {}) {
+    this.rawBuffer = '';
+    this.lastEndSeconds = 0;
+    this.config = {
+      silenceThresholdSec: config.silenceThresholdSec ?? DEFAULT_SILENCE_THRESHOLD_SECONDS,
+      maxSentenceChars: config.maxSentenceChars ?? DEFAULT_MAX_SENTENCE_CHARS,
+    };
+  }
+
+  /**
+   * 处理一条 WhisperLiveKit 的 line
+   * @param {{ start: string, end: string, text: string }} line
+   * @returns {{ text: string, rawLength: number }[]} 确认的句子列表
+   */
+  processLine(line) {
+    const sentences = [];
+    const rawText = (line.text || '');
+    if (!rawText.trim()) {
+      this.lastEndSeconds = parseClockToSeconds(line.end);
+      return sentences;
+    }
+
+    const startSeconds = parseClockToSeconds(line.start);
+    const endSeconds = parseClockToSeconds(line.end);
+
+    // 1. 基于时间间隔的断句：如果当前片段和上一个片段之间静音较长，则认为上一句已经结束
+    if (this.rawBuffer) {
+      const gap = startSeconds - this.lastEndSeconds;
+      if (gap > this.config.silenceThresholdSec) {
+        const flushed = this.flushInternal();
+        if (flushed) {
+          sentences.push(flushed);
+        }
+      }
+    }
+
+    // 2. 追加当前文本到原始缓冲区
+    this.rawBuffer += rawText;
+    this.lastEndSeconds = endSeconds;
+
+    // 3. 基于长度/标点的兜底切分，避免一句话过长
+    this.drainByLengthAndPunctuation(sentences);
+
+    return sentences;
+  }
+
+  /**
+   * 根据当前 rawBuffer 的长度和内部标点，尝试切出完整句子
+   * @param {Array} outSentences
+   */
+  drainByLengthAndPunctuation(outSentences) {
+    const { maxSentenceChars } = this.config;
+    // 循环处理，直到缓冲区长度在安全范围内
+    // 或者再也找不到合理的切分点
+    // 注意：这里完全基于原始文本，不依赖我们补的标点
+    while (this.rawBuffer && this.rawBuffer.length >= maxSentenceChars) {
+      const boundaryIndex = this.findLastBoundaryIndex(this.rawBuffer, maxSentenceChars);
+      if (boundaryIndex === -1) {
+        // 找不到合适的边界，只能整体作为一句
+        const flushed = this.flushInternal();
+        if (flushed) {
+          outSentences.push(flushed);
+        }
+        break;
+      }
+
+      const rawSentence = this.rawBuffer.slice(0, boundaryIndex + 1);
+      this.rawBuffer = this.rawBuffer.slice(boundaryIndex + 1);
+
+      const finalized = this.finalizeRawSentence(rawSentence);
+      if (finalized) {
+        outSentences.push(finalized);
+      }
+    }
+  }
+
+  /**
+   * 在给定窗口内，从后往前寻找最近的断句边界（句末标点优先，其次逗号等）
+   * @param {string} text
+   * @param {number} window
+   * @returns {number} 边界下标，找不到则返回 -1
+   */
+  findLastBoundaryIndex(text, window) {
+    const searchEnd = Math.min(text.length, window);
+    for (let i = searchEnd - 1; i >= 0; i -= 1) {
+      const ch = text[i];
+      if (SENTENCE_END_PUNCTUATION.has(ch) || CLAUSE_PUNCTUATION.has(ch)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * 将原始句子转换为最终展示文本，并返回其原始长度
+   * @param {string} rawSentence
+   * @returns {{ text: string, rawLength: number } | null}
+   */
+  finalizeRawSentence(rawSentence) {
+    if (!rawSentence) return null;
+    const raw = rawSentence;
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const textWithPunctuation = this.applyPunctuation(trimmed);
+    return {
+      text: textWithPunctuation,
+      rawLength: raw.length,
+    };
+  }
+
+  /**
+   * 内部 flush，不重置时间，只消费 rawBuffer
+   * @returns {{ text: string, rawLength: number } | null}
+   */
+  flushInternal() {
+    if (!this.rawBuffer) return null;
+    const rawSentence = this.rawBuffer;
+    this.rawBuffer = '';
+    return this.finalizeRawSentence(rawSentence);
+  }
+
+  /**
+   * 对句子末尾补充合理的标点（仅在没有终止符时才补）
+   * @param {string} text
+   * @returns {string}
+   */
+  applyPunctuation(text) {
+    if (!text) return text;
+    const lastChar = text[text.length - 1];
+    if (SENTENCE_END_PUNCTUATION.has(lastChar)) {
+      return text;
+    }
+
+    // 根据句末语气词猜测问号/感叹号
+    if (QUESTION_SUFFIXES.has(lastChar)) {
+      return `${text}？`;
+    }
+    if (EXCLAMATION_SUFFIXES.has(lastChar)) {
+      return `${text}！`;
+    }
+
+    // 如果以逗号、顿号等结束，将其升级为句号
+    if (CLAUSE_PUNCTUATION.has(lastChar)) {
+      return `${text.slice(0, -1)}。`;
+    }
+
+    return `${text}。`;
+  }
+
+  /**
+   * 显式 flush：通常在会话结束或服务器 ready_to_stop 时调用
+   * @returns {{ text: string, rawLength: number }[]} 剩余句子（最多一条）
+   */
+  flush() {
+    const result = this.flushInternal();
+    if (!result) return [];
+    return [result];
+  }
+
+  reset() {
+    this.rawBuffer = '';
+    this.lastEndSeconds = 0;
+  }
+}
+
 class WhisperLiveKitSession {
   constructor({
     sourceId,
@@ -44,10 +227,13 @@ class WhisperLiveKitSession {
     this.onPartial = onPartial;
     this.ws = null;
     this.isReady = false;
+    this.segmenter = new TextSegmenter();
     this.pendingBuffers = [];
     this.sentLineIds = new Set();
     this.lineOrder = [];
     this.lastPartialText = '';
+    // 记录已经“确认”的原始字符数，用于与 buffer_transcription 对齐
+    this.rawCommittedChars = 0;
     this.connect();
   }
 
@@ -114,7 +300,28 @@ class WhisperLiveKitSession {
       return;
     }
 
-    if (payload.type === 'config' || payload.type === 'ready_to_stop') {
+    if (payload.type === 'config') {
+      return;
+    }
+
+    // 会话结束信号：flush 剩余缓冲区
+    if (payload.type === 'ready_to_stop') {
+      const flushedSentences = this.segmenter.flush();
+      const timestamp = Date.now();
+      flushedSentences.forEach((sentence) => {
+        if (!sentence || !sentence.text) return;
+        this.rawCommittedChars += sentence.rawLength || 0;
+        if (this.onSentence) {
+          this.onSentence({
+            sessionId: this.sourceId,
+            text: sentence.text,
+            timestamp,
+            trigger: 'whisperlivekit',
+            audioDuration: null,
+            language: payload.detected_language || null,
+          });
+        }
+      });
       return;
     }
 
@@ -146,30 +353,48 @@ class WhisperLiveKitSession {
         const endSeconds = parseClockToSeconds(line.end);
         const duration = Math.max(0, endSeconds - startSeconds);
 
-        if (this.onSentence) {
-          this.onSentence({
-            sessionId: this.sourceId,
-            text,
-            timestamp,
-            trigger: 'whisperlivekit',
-            audioDuration: duration,
-            language: line.detected_language || null,
-          });
-        }
+        // 将行文本送入分句器，按句子粒度输出
+        const sentences = this.segmenter.processLine(line);
+        sentences.forEach((sentence) => {
+          if (!sentence || !sentence.text) return;
+          // 记录在原始文本中已经“确认”的字符数，用于后续 partial 去重
+          this.rawCommittedChars += sentence.rawLength || 0;
+          if (this.onSentence) {
+            this.onSentence({
+              sessionId: this.sourceId,
+              text: sentence.text,
+              timestamp,
+              trigger: 'whisperlivekit',
+              audioDuration: duration,
+              language: line.detected_language || null,
+            });
+          }
+        });
       });
     }
 
-    const partialText = (payload.buffer_transcription || '').trim();
-    if (partialText && partialText !== this.lastPartialText) {
-      this.lastPartialText = partialText;
-      if (this.onPartial) {
-        this.onPartial({
-          sessionId: this.sourceId,
-          partialText,
-          fullText: partialText,
-          timestamp,
-          isSpeaking: true,
-        });
+    // 处理流式 partial，减去已经确认的原始文本部分
+    const fullRaw = payload.buffer_transcription || '';
+    if (typeof fullRaw === 'string' && fullRaw.length > 0) {
+      let rawPartial = fullRaw;
+      if (this.rawCommittedChars > 0 && fullRaw.length > this.rawCommittedChars) {
+        rawPartial = fullRaw.slice(this.rawCommittedChars);
+      } else if (this.rawCommittedChars >= fullRaw.length) {
+        rawPartial = '';
+      }
+
+      const partialText = rawPartial.trim();
+      if (partialText && partialText !== this.lastPartialText) {
+        this.lastPartialText = partialText;
+        if (this.onPartial) {
+          this.onPartial({
+            sessionId: this.sourceId,
+            partialText,
+            fullText: fullRaw,
+            timestamp,
+            isSpeaking: true,
+          });
+        }
       }
     }
   }
@@ -178,6 +403,8 @@ class WhisperLiveKitSession {
     this.lastPartialText = '';
     this.sentLineIds.clear();
     this.lineOrder = [];
+    this.segmenter.reset();
+    this.rawCommittedChars = 0;
   }
 
   close() {

@@ -1,6 +1,54 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 
+const SIZE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
+
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) {
+    return '0 B';
+  }
+  const exponent = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    SIZE_UNITS.length - 1
+  );
+  const value = bytes / (1024 ** exponent);
+  return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${SIZE_UNITS[exponent]}`;
+}
+
+function formatSpeed(bytesPerSecond) {
+  if (!bytesPerSecond || bytesPerSecond <= 0) {
+    return '—';
+  }
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function buildStatusMap(statusList = []) {
+  return statusList.reduce((acc, status) => {
+    if (!status?.modelId) {
+      return acc;
+    }
+    acc[status.modelId] = {
+      bytesPerSecond: 0,
+      ...status,
+    };
+    return acc;
+  }, {});
+}
+
+function calculateProgress(downloadedBytes, totalBytes) {
+  if (!totalBytes || totalBytes <= 0) {
+    return 0;
+  }
+  return Math.min(100, Math.round((downloadedBytes / totalBytes) * 100));
+}
+
+function isPresetActive(preset, activeModelId) {
+  if (!activeModelId) {
+    return false;
+  }
+  return activeModelId === preset.id || activeModelId === preset.repoId;
+}
+
 /**
  * ASR（语音识别）设置页面
  */
@@ -12,9 +60,17 @@ function ASRSettings() {
   const [showAddConfig, setShowAddConfig] = useState(false);
   const [editingConfig, setEditingConfig] = useState(null);
 
+  // Faster-Whisper 模型
+  const [modelPresets, setModelPresets] = useState([]);
+  const [modelStatuses, setModelStatuses] = useState({});
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelsError, setModelsError] = useState('');
+  const [activeModelId, setActiveModelId] = useState(null);
+  const [savingModelId, setSavingModelId] = useState(null);
+
   // 表单数据
   const [formData, setFormData] = useState({
-    model_name: 'ggml-whisper-large-zh-cv11-Q2_K.bin',
+    model_name: 'medium',
     language: 'zh',
     enable_vad: true,
     sentence_pause_threshold: 1.0,
@@ -22,19 +78,6 @@ function ASRSettings() {
     audio_retention_days: 30,
     audio_storage_path: ''
   });
-
-  // 可用模型选项
-  const modelOptions = [
-    { value: 'whisper-tiny', label: 'Whisper Tiny (~75MB)', description: '最小模型，适合低端设备，准确率一般' },
-    { value: 'whisper-base', label: 'Whisper Base (~150MB)', description: '平衡模型，推荐用于大多数设备' },
-    { value: 'whisper-small', label: 'Whisper Small (~500MB)', description: '较大模型，准确率更高，需要较好性能' },
-    { value: 'ggml-whisper-large-zh-cv11-Q2_K.bin', label: 'Whisper Large ZH CV11 Q2_K (~529MB)', description: '中文优化大模型，Q2_K量化版本，适合中文语音识别，准确率高' },
-    { value: 'ggml-whisper-large-zh-cv11-Q3_K.bin', label: 'Whisper Large ZH CV11 Q3_K (~685MB)', description: '中文优化大模型，Q3_K量化版本，推荐使用，平衡准确率和性能' },
-    { value: 'ggml-whisper-large-zh-cv11-Q4_K.bin', label: 'Whisper Large ZH CV11 Q4_K (~889MB)', description: '中文优化大模型，Q4_K量化版本，高准确率' },
-    { value: 'ggml-whisper-large-zh-cv11-Q5_K.bin', label: 'Whisper Large ZH CV11 Q5_K (~1.08GB)', description: '中文优化大模型，Q5_K量化版本，更高准确率' },
-    { value: 'ggml-whisper-large-zh-cv11-Q6_K.bin', label: 'Whisper Large ZH CV11 Q6_K (~1.28GB)', description: '中文优化大模型，Q6_K量化版本，接近原始精度' },
-    { value: 'ggml-whisper-large-zh-cv11-Q8_0.bin', label: 'Whisper Large ZH CV11 Q8_0 (~1.66GB)', description: '中文优化大模型，Q8_0量化版本，最高精度' }
-  ];
 
   // 语言选项
   const languageOptions = [
@@ -46,7 +89,191 @@ function ASRSettings() {
 
   useEffect(() => {
     loadASRConfigs();
+    loadModelData();
+
+    const api = window.electronAPI;
+    if (!api) {
+      return undefined;
+    }
+
+    const cleanups = [];
+
+    if (api.onAsrModelDownloadStarted) {
+      cleanups.push(api.onAsrModelDownloadStarted((payload) => {
+        setModelStatuses((prev) => {
+          const previous = prev[payload.modelId] || { modelId: payload.modelId };
+          return {
+            ...prev,
+            [payload.modelId]: {
+              ...previous,
+              modelId: payload.modelId,
+              activeDownload: true,
+              bytesPerSecond: 0,
+            },
+          };
+        });
+      }));
+    }
+
+    if (api.onAsrModelDownloadProgress) {
+      cleanups.push(api.onAsrModelDownloadProgress((payload) => {
+        setModelStatuses((prev) => {
+          const previous = prev[payload.modelId] || { modelId: payload.modelId };
+          return {
+            ...prev,
+            [payload.modelId]: {
+              ...previous,
+              modelId: payload.modelId,
+              downloadedBytes: payload.downloadedBytes ?? previous.downloadedBytes ?? 0,
+              totalBytes: payload.totalBytes ?? previous.totalBytes ?? previous.sizeBytes ?? 0,
+              bytesPerSecond: payload.bytesPerSecond ?? previous.bytesPerSecond ?? 0,
+              activeDownload: true,
+              isDownloaded: false,
+            },
+          };
+        });
+      }));
+    }
+
+    if (api.onAsrModelDownloadComplete) {
+      cleanups.push(api.onAsrModelDownloadComplete((payload) => {
+        const status = payload.status || {};
+        setModelStatuses((prev) => ({
+          ...prev,
+          [payload.modelId]: {
+            ...(status.modelId ? status : { ...status, modelId: payload.modelId }),
+            bytesPerSecond: 0,
+            activeDownload: false,
+          },
+        }));
+      }));
+    }
+
+    if (api.onAsrModelDownloadError) {
+      cleanups.push(api.onAsrModelDownloadError((payload) => {
+        setModelStatuses((prev) => {
+          const previous = prev[payload.modelId] || { modelId: payload.modelId };
+          return {
+            ...prev,
+            [payload.modelId]: {
+              ...previous,
+              modelId: payload.modelId,
+              activeDownload: false,
+            },
+          };
+        });
+      }));
+    }
+
+    if (api.onAsrModelDownloadCancelled) {
+      cleanups.push(api.onAsrModelDownloadCancelled((payload) => {
+        setModelStatuses((prev) => {
+          const previous = prev[payload.modelId] || { modelId: payload.modelId };
+          return {
+            ...prev,
+            [payload.modelId]: {
+              ...previous,
+              modelId: payload.modelId,
+              activeDownload: false,
+            },
+          };
+        });
+      }));
+    }
+
+    return () => {
+      cleanups.forEach((cleanup) => {
+        if (typeof cleanup === 'function') {
+          cleanup();
+        }
+      });
+    };
   }, []);
+
+  const loadModelData = async () => {
+    try {
+      setModelsError('');
+      setModelsLoading(true);
+      const api = window.electronAPI;
+      if (!api?.asrGetModelPresets) {
+        throw new Error('ASR 模型接口不可用');
+      }
+
+      const presets = await api.asrGetModelPresets();
+      const statuses = await api.asrGetAllModelStatuses();
+
+      setModelPresets(presets || []);
+      setModelStatuses(buildStatusMap(statuses || []));
+    } catch (err) {
+      console.error('加载模型数据失败：', err);
+      setModelsError(err.message || '加载模型数据失败');
+    } finally {
+      setModelsLoading(false);
+    }
+  };
+
+  const handleDownloadModel = async (modelId) => {
+    try {
+      const api = window.electronAPI;
+      if (!api?.asrDownloadModel) {
+        throw new Error('下载接口不可用');
+      }
+      await api.asrDownloadModel(modelId);
+    } catch (err) {
+      console.error('下载模型失败：', err);
+      alert('下载模型失败：' + (err.message || '未知错误'));
+    }
+  };
+
+  const handleCancelDownload = async (modelId) => {
+    try {
+      const api = window.electronAPI;
+      if (!api?.asrCancelModelDownload) {
+        throw new Error('取消下载接口不可用');
+      }
+      await api.asrCancelModelDownload(modelId);
+    } catch (err) {
+      console.error('取消下载失败：', err);
+      alert('取消下载失败：' + (err.message || '未知错误'));
+    }
+  };
+
+  const handleSetActiveModel = async (modelId) => {
+    try {
+      if (!asrDefaultConfig) {
+        alert('请先创建并设置一个默认的 ASR 配置');
+        return;
+      }
+      const api = window.electronAPI;
+      if (!api?.asrUpdateConfig) {
+        throw new Error('ASR 配置接口不可用');
+      }
+      setSavingModelId(modelId);
+      await api.asrUpdateConfig(asrDefaultConfig.id, { model_name: modelId });
+      await loadASRConfigs();
+      setActiveModelId(modelId);
+    } catch (err) {
+      console.error('设置默认模型失败：', err);
+      alert('设置默认模型失败：' + (err.message || '未知错误'));
+    } finally {
+      setSavingModelId(null);
+    }
+  };
+
+  useEffect(() => {
+    if (modelPresets.length === 0) {
+      return;
+    }
+    setFormData((prev) => {
+      if (modelPresets.some((preset) => preset.id === prev.model_name)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        model_name: modelPresets[0].id,
+      };
+    });
+  }, [modelPresets]);
 
   // 加载 ASR 配置
   const loadASRConfigs = async () => {
@@ -63,6 +290,8 @@ function ASRSettings() {
       // 查找默认配置
       const defaultConfig = configs?.find(config => config.is_default === 1);
       setAsrDefaultConfig(defaultConfig || null);
+      const activeModel = defaultConfig?.model_name || configs?.[0]?.model_name || null;
+      setActiveModelId(activeModel || null);
 
       console.log('ASR configs loaded:', configs);
     } catch (err) {
@@ -152,7 +381,7 @@ function ASRSettings() {
   // 重置表单
   const resetForm = () => {
     setFormData({
-      model_name: 'ggml-whisper-large-zh-cv11-Q2_K.bin',
+      model_name: modelPresets[0]?.id || 'medium',
       language: 'zh',
       enable_vad: true,
       sentence_pause_threshold: 1.0,
@@ -165,6 +394,118 @@ function ASRSettings() {
   // 测试 ASR 功能
   const testASR = async () => {
     alert('ASR 测试功能：系统将使用当前默认配置进行语音识别测试。\n\n请确保：\n1. 已选择正确的音频输入设备\n2. 麦克风权限已授权\n3. 环境相对安静');
+  };
+
+  const selectedModelPreset = modelPresets.find((preset) => preset.id === formData.model_name);
+
+  const renderModelCard = (preset) => {
+    const status = modelStatuses[preset.id] || {};
+    const totalBytes = status.totalBytes || status.sizeBytes || preset.sizeBytes || 0;
+    const downloadedBytes = status.downloadedBytes || 0;
+    const percent = calculateProgress(downloadedBytes, totalBytes);
+    const isDownloaded = Boolean(status.isDownloaded);
+    const activeDownload = Boolean(status.activeDownload);
+    const isActive = isPresetActive(preset, activeModelId);
+    const updatedAt = status.updatedAt ? new Date(status.updatedAt).toLocaleString() : null;
+    const progressVisible = totalBytes > 0 && (activeDownload || (downloadedBytes > 0 && !isDownloaded));
+
+    return (
+      <div
+        key={preset.id}
+        className={`rounded-2xl border bg-white p-5 shadow-sm transition-all ${
+          isActive ? 'border-blue-500 ring-2 ring-blue-100' : 'border-gray-200'
+        }`}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900">{preset.label}</h3>
+            <p className="mt-1 text-sm text-gray-600">{preset.description}</p>
+          </div>
+          {isActive && (
+            <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-medium text-blue-700">
+              当前使用
+            </span>
+          )}
+        </div>
+
+        <div className="mt-4 grid gap-2 text-sm text-gray-700">
+          <p>推荐配置：{preset.recommendedSpec}</p>
+          <p>速度参考：{preset.speedHint}</p>
+          <p>模型大小：{formatBytes(preset.sizeBytes)}</p>
+        </div>
+
+        <div className="mt-4 text-sm">
+          {isDownloaded ? (
+            <div className="flex items-center text-green-600">
+              <svg className="mr-2 h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                <path
+                  fillRule="evenodd"
+                  d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-10.707a1 1 0 00-1.414-1.414L9 9.586 7.707 8.293a1 1 0 10-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+                  clipRule="evenodd"
+                />
+              </svg>
+              <span>
+                本地可用{updatedAt ? ` · 更新于 ${updatedAt}` : ''}
+              </span>
+            </div>
+          ) : (
+            <div className="text-gray-500">
+              {activeDownload ? '正在下载模型...' : '尚未下载，点击下方按钮开始下载'}
+            </div>
+          )}
+        </div>
+
+        {progressVisible && (
+          <div className="mt-3">
+            <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+              <div
+                className={`h-full rounded-full ${isDownloaded ? 'bg-green-500' : 'bg-blue-500'}`}
+                style={{ width: `${percent}%` }}
+              />
+            </div>
+            <div className="mt-1 flex items-center justify-between text-xs text-gray-600">
+              <span>
+                {formatBytes(downloadedBytes)} / {formatBytes(totalBytes)} ({percent}%)
+              </span>
+              <span>速度：{formatSpeed(status.bytesPerSecond)}</span>
+            </div>
+          </div>
+        )}
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          {isDownloaded ? (
+            <button
+              onClick={() => handleSetActiveModel(preset.id)}
+              disabled={isActive || savingModelId === preset.id}
+              className={`rounded-lg px-4 py-2 text-sm font-medium ${
+                isActive
+                  ? 'bg-gray-100 text-gray-500 cursor-not-allowed'
+                  : 'bg-blue-600 text-white hover:bg-blue-700'
+              } transition-colors`}
+            >
+              {isActive ? '当前已启用' : savingModelId === preset.id ? '应用中...' : '设为当前模型'}
+            </button>
+          ) : (
+            <button
+              onClick={() => handleDownloadModel(preset.id)}
+              disabled={activeDownload || modelsLoading}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+            >
+              {activeDownload ? '下载中...' : '下载模型'}
+            </button>
+          )}
+
+          {activeDownload && (
+            <button
+              onClick={() => handleCancelDownload(preset.id)}
+              className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              取消下载
+            </button>
+          )}
+        </div>
+      </div>
+    );
   };
 
   if (loading) {
@@ -193,6 +534,51 @@ function ASRSettings() {
             ← 返回设置
           </Link>
         </div>
+      </div>
+
+      {/* 模型管理 */}
+      <div className="mb-8">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-semibold text-gray-900">Faster-Whisper 模型管理</h2>
+            <p className="text-sm text-gray-600 mt-1">
+              选择适合设备性能的模型，查看本地缓存状态，并监控下载速度
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={loadModelData}
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              🔄 刷新模型状态
+            </button>
+          </div>
+        </div>
+
+        {modelsError && (
+          <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            {modelsError}
+          </div>
+        )}
+
+        {modelsLoading ? (
+          <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {[...Array(3)].map((_, index) => (
+              <div
+                key={index}
+                className="h-48 animate-pulse rounded-2xl border border-gray-200 bg-gray-100"
+              />
+            ))}
+          </div>
+        ) : modelPresets.length === 0 ? (
+          <div className="mt-6 rounded-lg border-2 border-dashed border-gray-200 p-8 text-center text-gray-500">
+            暂无可用的 Faster-Whisper 模型预设
+          </div>
+        ) : (
+          <div className="mt-6 grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+            {modelPresets.map((preset) => renderModelCard(preset))}
+          </div>
+        )}
       </div>
 
       {/* 默认配置信息 */}
@@ -306,14 +692,19 @@ function ASRSettings() {
                 onChange={(e) => setFormData({ ...formData, model_name: e.target.value })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
-                {modelOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
+                {modelPresets.length === 0 && (
+                  <option value="">暂无可用模型</option>
+                )}
+                {modelPresets.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.label} ({formatBytes(preset.sizeBytes)})
                   </option>
                 ))}
               </select>
               <p className="mt-1 text-xs text-gray-500">
-                {modelOptions.find(m => m.value === formData.model_name)?.description}
+                {selectedModelPreset
+                  ? `${selectedModelPreset.description} · 推荐: ${selectedModelPreset.recommendedSpec}`
+                  : '选择模型后可查看详细说明'}
               </p>
             </div>
 

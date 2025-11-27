@@ -159,6 +159,14 @@ export default class ASRModelManager extends EventEmitter {
     };
   }
 
+  getAllModelStatuses() {
+    try {
+      return ASR_MODEL_PRESETS.map((preset) => this.getModelStatus(preset.id));
+    } catch (error) {
+      return [];
+    }
+  }
+
   startDownload(modelId) {
     if (this.activeDownloads.has(modelId)) {
       return { status: 'running' };
@@ -196,6 +204,8 @@ export default class ASRModelManager extends EventEmitter {
       totalBytes: preset.sizeBytes || null,
       snapshotPath: null,
       timer: null,
+      lastBytes: 0,
+      lastTimestamp: Date.now(),
     };
     this.activeDownloads.set(modelId, downloadCtx);
     this.broadcast('asr-model-download-started', {
@@ -297,11 +307,18 @@ export default class ASRModelManager extends EventEmitter {
     }
     const downloadedBytes = directorySize(ctx.snapshotPath);
     const totalBytes = ctx.totalBytes || downloadedBytes;
+    const now = Date.now();
+    const elapsedMs = now - (ctx.lastTimestamp || now);
+    const deltaBytes = downloadedBytes - (ctx.lastBytes || 0);
+    const bytesPerSecond = elapsedMs > 0 ? (deltaBytes / (elapsedMs / 1000)) : 0;
+    ctx.lastBytes = downloadedBytes;
+    ctx.lastTimestamp = now;
     this.broadcast('asr-model-download-progress', {
       modelId: ctx.modelId,
       repoId: ctx.repoId,
       downloadedBytes,
       totalBytes,
+      bytesPerSecond,
     });
     if (force && ctx.timer) {
       clearInterval(ctx.timer);
