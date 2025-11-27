@@ -563,6 +563,15 @@ function setupIPC() {
     }
   });
 
+  ipcMain.handle('asr-get-all-model-statuses', () => {
+    try {
+      return modelManager.getAllModelStatuses();
+    } catch (error) {
+      console.error('Error getting ASR model statuses:', error);
+      return [];
+    }
+  });
+
   ipcMain.handle('asr-download-model', (event, modelId) => {
     try {
       return modelManager.startDownload(modelId);

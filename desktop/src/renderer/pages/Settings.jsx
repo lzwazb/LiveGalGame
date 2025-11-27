@@ -1070,6 +1070,26 @@ function Settings() {
           )}
         </div>
 
+        {/* ASR设置 */}
+        <div className="bg-surface-light dark:bg-surface-dark rounded-xl p-6 border border-border-light dark:border-border-dark mb-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold text-text-light dark:text-text-dark flex items-center gap-2">
+              <span className="material-symbols-outlined text-primary">mic</span>
+              语音识别设置
+            </h2>
+            <Link
+              to="/asr-settings"
+              className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary/90 transition-colors text-sm flex items-center gap-2"
+            >
+              <span className="material-symbols-outlined text-sm">settings</span>
+              管理ASR配置
+            </Link>
+          </div>
+          <p className="text-text-muted-light dark:text-text-muted-dark">
+            配置语音识别模型、音频设备和录音选项
+          </p>
+        </div>
+
         {/* 其他设置 */}
         <div className="bg-surface-light dark:bg-surface-dark rounded-xl p-6 border border-border-light dark:border-border-dark">
           <h2 className="text-xl font-semibold text-text-light dark:text-text-dark mb-4 flex items-center gap-2">

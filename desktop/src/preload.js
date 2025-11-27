@@ -83,6 +83,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   asrCheckReady: () => ipcRenderer.invoke('asr-check-ready'),
   asrStart: (conversationId) => ipcRenderer.invoke('asr-start', conversationId),
   asrStop: () => ipcRenderer.invoke('asr-stop'),
+  asrGetModelPresets: () => ipcRenderer.invoke('asr-get-model-presets'),
+  asrGetModelStatus: (modelId) => ipcRenderer.invoke('asr-get-model-status', modelId),
+  asrGetAllModelStatuses: () => ipcRenderer.invoke('asr-get-all-model-statuses'),
+  asrDownloadModel: (modelId) => ipcRenderer.invoke('asr-download-model', modelId),
+  asrCancelModelDownload: (modelId) => ipcRenderer.invoke('asr-cancel-model-download', modelId),
   asrGetConfigs: () => ipcRenderer.invoke('asr-get-configs'),
   asrCreateConfig: (configData) => ipcRenderer.invoke('asr-create-config', configData),
   asrUpdateConfig: (id, updates) => ipcRenderer.invoke('asr-update-config', id, updates),
@@ -93,6 +98,31 @@ contextBridge.exposeInMainWorld('electronAPI', {
   asrGetSpeechRecords: (conversationId) => ipcRenderer.invoke('asr-get-speech-records', conversationId),
   asrConvertToMessage: (recordId, conversationId) => ipcRenderer.invoke('asr-convert-to-message', recordId, conversationId),
   asrCleanupAudioFiles: (retentionDays) => ipcRenderer.invoke('asr-cleanup-audio-files', retentionDays),
+  onAsrModelDownloadStarted: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('asr-model-download-started', listener);
+    return () => ipcRenderer.removeListener('asr-model-download-started', listener);
+  },
+  onAsrModelDownloadProgress: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('asr-model-download-progress', listener);
+    return () => ipcRenderer.removeListener('asr-model-download-progress', listener);
+  },
+  onAsrModelDownloadComplete: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('asr-model-download-complete', listener);
+    return () => ipcRenderer.removeListener('asr-model-download-complete', listener);
+  },
+  onAsrModelDownloadError: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('asr-model-download-error', listener);
+    return () => ipcRenderer.removeListener('asr-model-download-error', listener);
+  },
+  onAsrModelDownloadCancelled: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('asr-model-download-cancelled', listener);
+    return () => ipcRenderer.removeListener('asr-model-download-cancelled', listener);
+  },
 
   // Desktop Capturer API (用于系统音频捕获)
   getDesktopSources: (options) => ipcRenderer.invoke('get-desktop-sources', options),
