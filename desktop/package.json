@@ -5,9 +5,10 @@
   "type": "module",
   "main": "src/main.js",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"sh -c 'wait-on http://localhost:5173 && cross-env NODE_ENV=development electron . --enable-logging'\"",
+    "predev": "node scripts/ensure-port-free.js",
+    "dev": "pnpm run predev && concurrently -k \"vite\" \"npm run dev:electron\"",
+    "dev:electron": "cross-env NODE_ENV=development electron . --enable-logging",
     "dev:vite": "vite",
-    "dev:electron": "electron . --enable-logging",
     "download-models": "node scripts/download-models.js",
     "download-ggml-models": "node scripts/download-ggml-models.js",
     "download-belle-whisper": "node scripts/download-belle-whisper-model.js",
@@ -15,7 +16,9 @@
     "setup-whisper-cpp": "bash scripts/setup-whisper-cpp.sh",
     "setup-funasr": "bash scripts/setup-funasr.sh",
     "build:native": "node-gyp rebuild --directory=src/native/system-audio-capture",
+    "rebuild:better-sqlite3": "electron-rebuild -f -w better-sqlite3",
     "rebuild:native": "electron-rebuild -f -w system_audio_capture",
+    "postinstall": "pnpm run rebuild:better-sqlite3",
     "prebuild": "npm run download-ggml-models",
     "build": "vite build && electron-builder",
     "build:vite": "vite build",
@@ -45,6 +48,7 @@
     "autoprefixer": "^10.4.22",
     "concurrently": "^9.1.0",
     "cross-env": "^10.1.0",
+    "kill-port": "^2.0.1",
     "electron": "^35.7.5",
     "electron-builder": "^25.1.8",
     "postcss": "^8.5.6",
@@ -63,7 +67,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.28.0",
-    "sharp": "0.34.5"
+    "sharp": "0.34.5",
+    "ws": "^8.18.3"
   },
   "build": {
     "appId": "com.livegalgame.desktop",

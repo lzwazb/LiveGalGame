@@ -18,6 +18,9 @@ class ASRManager {
     // 事件发射器（用于向渲染进程发送事件）
     this.eventEmitter = null;
 
+    // 服务器崩溃回调
+    this.onServerCrash = null;
+
     // 当前对话 ID
     this.currentConversationId = null;
 
@@ -35,6 +38,14 @@ class ASRManager {
     this.isSpeaking = false;
 
     logger.log('ASRManager created');
+  }
+
+  /**
+   * 设置服务器崩溃回调
+   * @param {Function} callback - (exitCode) => void
+   */
+  setServerCrashCallback(callback) {
+    this.onServerCrash = callback;
   }
 
   /**
@@ -57,6 +68,17 @@ class ASRManager {
       // 创建 WhisperService 实例（如果还没有）
       if (!this.whisperService) {
         this.whisperService = await createWhisperService();
+
+        // 设置服务器崩溃回调
+        if (typeof this.whisperService.setServerCrashCallback === 'function') {
+          this.whisperService.setServerCrashCallback((exitCode) => {
+            logger.error(`[ASRManager] Server crashed with code ${exitCode}`);
+            this.isInitialized = false;
+            if (this.onServerCrash) {
+              this.onServerCrash(exitCode);
+            }
+          });
+        }
       }
 
       // 获取默认 ASR 配置

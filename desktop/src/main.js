@@ -56,8 +56,9 @@ function createWindow() {
     title: 'LiveGalGame Desktop',
     // 无边框窗口，看起来更像客户端应用
     frame: false,
+    transparent: true,
     // 确保窗口看起来像原生应用
-    backgroundColor: '#f8f6f7', // 浅色背景色，避免加载时闪烁
+    // backgroundColor: '#f8f6f7', // 移除背景色以支持透明圆角
     // 禁用菜单栏（可选）
     autoHideMenuBar: true
   });
@@ -528,6 +529,18 @@ function setupIPC() {
       if (!asrManager) {
         asrManager = new ASRManager();
         asrManager.setEventEmitter(emitASREvent);
+
+        // 设置服务器崩溃回调
+        asrManager.setServerCrashCallback((exitCode) => {
+          console.error(`[ASR] 服务器崩溃 (code: ${exitCode})，重置预加载状态`);
+          asrModelPreloaded = false;
+          asrModelPreloading = false;
+
+          const windows = BrowserWindow.getAllWindows();
+          windows.forEach(window => {
+            window.webContents.send('asr-server-crashed', { exitCode });
+          });
+        });
       }
       // 如果模型已经预加载，只需要设置conversationId并确保服务已启动
       if (asrModelPreloaded && asrManager.isInitialized) {
@@ -647,6 +660,18 @@ function setupIPC() {
         console.log('[ASR] Creating new ASRManager instance');
         asrManager = new ASRManager();
         asrManager.setEventEmitter(emitASREvent);
+
+        // 设置服务器崩溃回调
+        asrManager.setServerCrashCallback((exitCode) => {
+          console.error(`[ASR] 服务器崩溃 (code: ${exitCode})，重置预加载状态`);
+          asrModelPreloaded = false;
+          asrModelPreloading = false;
+
+          const windows = BrowserWindow.getAllWindows();
+          windows.forEach(window => {
+            window.webContents.send('asr-server-crashed', { exitCode });
+          });
+        });
       }
       await asrManager.start(conversationId);
       console.log('[ASR] ASR started successfully');
@@ -1064,6 +1089,16 @@ app.on('will-quit', () => {
   // 注销所有全局快捷键
   globalShortcut.unregisterAll();
   console.log('全局快捷键已注销');
+
+  // 清理ASR管理器和服务器进程
+  if (asrManager) {
+    try {
+      asrManager.destroy();
+      console.log('ASR管理器已清理，WhisperLiveKit服务器进程已终止');
+    } catch (error) {
+      console.error('ASR管理器清理失败:', error);
+    }
+  }
 });
 
 // 所有窗口关闭时退出应用（除了macOS）
@@ -1086,6 +1121,19 @@ async function preloadASRModel() {
     if (!asrManager) {
       asrManager = new ASRManager();
       asrManager.setEventEmitter(emitASREvent);
+
+      // 设置服务器崩溃回调，重置预加载状态
+      asrManager.setServerCrashCallback((exitCode) => {
+        console.error(`[ASR] 服务器崩溃 (code: ${exitCode})，重置预加载状态`);
+        asrModelPreloaded = false;
+        asrModelPreloading = false;
+
+        // 通知所有窗口服务器崩溃
+        const windows = BrowserWindow.getAllWindows();
+        windows.forEach(window => {
+          window.webContents.send('asr-server-crashed', { exitCode });
+        });
+      });
     }
 
     // 只初始化模型，不设置conversationId（因为还没有对话）
@@ -1097,6 +1145,7 @@ async function preloadASRModel() {
   } catch (error) {
     console.error('[ASR] 预加载ASR模型失败:', error);
     asrModelPreloading = false;
+    asrModelPreloaded = false;
     // 预加载失败不影响应用启动，后续使用时再加载
   }
 }

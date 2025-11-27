@@ -5,6 +5,7 @@ import { spawn } from 'child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 import { app } from 'electron';
+import killPort from 'kill-port';
 import * as logger from '../utils/logger.js';
 
 const DEFAULT_WLK_HOST = '127.0.0.1';
@@ -201,7 +202,10 @@ class ASRService {
     this.sessions = new Map();
     this.onSentenceComplete = null;
     this.onPartialResult = null;
+    this.onServerCrash = null; // 服务器崩溃回调
     this.retainAudioFiles = false;
+    this.serverStartRetries = 0;
+    this.maxServerRetries = 3;
 
     this.tempDir = path.join(app.getPath('temp'), 'asr');
     if (!fs.existsSync(this.tempDir)) {
@@ -209,6 +213,14 @@ class ASRService {
     }
 
     logger.log(`[WhisperLiveKit] Python path detected: ${this.pythonPath}`);
+  }
+
+  /**
+   * 设置服务器崩溃回调
+   * @param {Function} callback - (exitCode) => void
+   */
+  setServerCrashCallback(callback) {
+    this.onServerCrash = callback;
   }
 
   detectPythonPath() {
@@ -238,6 +250,10 @@ class ASRService {
     this.audioStoragePath = options.audioStoragePath || this.tempDir;
 
     await this.ensureWhisperLiveKitInstalled();
+
+    // 预加载模型（如果失败，服务器启动时会自动下载）
+    await this.preloadModel();
+
     await this.startWhisperLiveKitServer();
 
     this.isInitialized = true;
@@ -252,14 +268,31 @@ class ASRService {
 
     try {
       await this.runPythonCommand(['-m', 'pip', 'show', 'whisperlivekit']);
+      await this.runPythonCommand(['-m', 'pip', 'show', 'faster-whisper']);
       this.whisperLiveKitReady = true;
       return;
     } catch {
-      logger.log('[WhisperLiveKit] Installing whisperlivekit via pip...');
+      logger.log('[WhisperLiveKit] Installing whisperlivekit and faster-whisper via pip...');
     }
 
-    await this.runPythonCommand(['-m', 'pip', 'install', '--upgrade', 'whisperlivekit']);
+    await this.runPythonCommand(['-m', 'pip', 'install', '--upgrade', 'whisperlivekit', 'faster-whisper']);
     this.whisperLiveKitReady = true;
+  }
+
+  async preloadModel() {
+    try {
+      logger.log(`[WhisperLiveKit] Preloading ${this.modelName} model...`);
+      // 使用faster-whisper直接加载模型来预热缓存
+      await this.runPythonCommand([
+        '-c',
+        `from faster_whisper import WhisperModel; print("Loading ${this.modelName} model..."); model = WhisperModel('${this.modelName}', device='cpu', compute_type='int8'); print("${this.modelName} model loaded successfully")`
+      ]);
+      logger.log(`[WhisperLiveKit] ${this.modelName} model preloaded successfully`);
+      return true;
+    } catch (error) {
+      logger.warn(`[WhisperLiveKit] Model preload failed, will download during server start: ${error.message}`);
+      return false;
+    }
   }
 
   runPythonCommand(args) {
@@ -296,6 +329,17 @@ class ASRService {
       return;
     }
 
+    try {
+      await killPort(this.serverPort);
+      logger.log(`[WhisperLiveKit] Released port ${this.serverPort}`);
+    } catch (error) {
+      // Ignore errors if port wasn't occupied
+      logger.log(`[WhisperLiveKit] Port cleanup info: ${error.message}`);
+    }
+
+    // 等待一小段时间确保端口完全释放
+    await delay(500);
+
     const args = [
       '-m',
       'whisperlivekit.basic_server',
@@ -309,36 +353,88 @@ class ASRService {
       String(this.serverPort),
       '--backend-policy',
       this.backendPolicy,
+      '--backend',
+      'faster-whisper',
       '--pcm-input',
     ];
 
     logger.log(`[WhisperLiveKit] Spawning server: ${this.pythonPath} ${args.join(' ')}`);
 
-    this.wlkProcess = spawn(this.pythonPath, args, {
-      env: {
-        ...process.env,
-        PYTHONUNBUFFERED: '1',
-      },
+    // 使用 Promise 来跟踪服务器启动过程中的崩溃
+    const serverStartPromise = new Promise((resolve, reject) => {
+      this.wlkProcess = spawn(this.pythonPath, args, {
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: '1',
+        },
+      });
+
+      let startupComplete = false;
+
+      this.wlkProcess.stdout.on('data', (data) => {
+        logger.log(`[WhisperLiveKit][stdout] ${data.toString().trim()}`);
+      });
+
+      this.wlkProcess.stderr.on('data', (data) => {
+        logger.log(`[WhisperLiveKit][stderr] ${data.toString().trim()}`);
+      });
+
+      this.wlkProcess.on('close', (code) => {
+        logger.warn(`[WhisperLiveKit] Server exited with code ${code}`);
+        this.wlkProcess = null;
+        this.isInitialized = false;
+
+        // 如果服务器在启动阶段就崩溃了，reject promise
+        if (!startupComplete) {
+          reject(new Error(`Server crashed during startup with code ${code}`));
+          return;
+        }
+
+        // 如果是启动后崩溃，通知上层
+        if (this.onServerCrash) {
+          this.onServerCrash(code);
+        }
+      });
+
+      this.wlkProcess.on('error', (error) => {
+        logger.error(`[WhisperLiveKit] Server process error:`, error);
+        if (!startupComplete) {
+          reject(error);
+        }
+      });
+
+      // 标记启动阶段完成的函数
+      this._markStartupComplete = () => {
+        startupComplete = true;
+        resolve();
+      };
     });
 
-    this.wlkProcess.stdout.on('data', (data) => {
-      logger.log(`[WhisperLiveKit][stdout] ${data.toString().trim()}`);
-    });
+    // 并行等待：服务器就绪 或 服务器崩溃
+    try {
+      await Promise.race([
+        this.waitForServerReady().then(() => {
+          if (this._markStartupComplete) {
+            this._markStartupComplete();
+          }
+        }),
+        serverStartPromise
+      ]);
+    } catch (error) {
+      // 服务器启动失败，尝试重试
+      this.serverStartRetries++;
+      if (this.serverStartRetries < this.maxServerRetries) {
+        logger.warn(`[WhisperLiveKit] Server start failed, retry ${this.serverStartRetries}/${this.maxServerRetries}...`);
+        await delay(2000); // 等待2秒后重试
+        return this.startWhisperLiveKitServer();
+      }
+      throw new Error(`Server failed to start after ${this.maxServerRetries} retries: ${error.message}`);
+    }
 
-    this.wlkProcess.stderr.on('data', (data) => {
-      logger.log(`[WhisperLiveKit][stderr] ${data.toString().trim()}`);
-    });
-
-    this.wlkProcess.on('close', (code) => {
-      logger.warn(`[WhisperLiveKit] Server exited with code ${code}`);
-      this.wlkProcess = null;
-      this.isInitialized = false;
-    });
-
-    await this.waitForServerReady();
+    this.serverStartRetries = 0; // 重置重试计数
   }
 
-  async waitForServerReady(timeoutMs = 20000) {
+  async waitForServerReady(timeoutMs = 60000) { // 增加到60秒，处理模型下载
     const start = Date.now();
 
     const tryRequest = () => new Promise((resolve, reject) => {

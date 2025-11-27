@@ -117,34 +117,6 @@ function Settings() {
     audio_storage_path: ''
   });;
 
-  useEffect(() => {
-    loadConfigs();
-    // 先加载音频源配置，再加载设备列表（因为设备列表需要用到音频源配置）
-    loadAudioSources().then(() => {
-      loadAudioDevices();
-    });
-  }, []);
-
-  // 当音频源配置加载完成后，更新设备选择
-  useEffect(() => {
-    if (speaker1Source?.device_id && audioDevices.length > 0) {
-      const device = audioDevices.find(d => d.deviceId === speaker1Source.device_id);
-      if (device && selectedAudioDevice !== device.deviceId) {
-        setSelectedAudioDevice(device.deviceId);
-      }
-    }
-    if (speaker2Source?.device_id && audioDevices.length > 0 && captureSystemAudio) {
-      const device = audioDevices.find(d => d.deviceId === speaker2Source.device_id);
-      if (device && selectedSystemAudioDevice !== device.deviceId) {
-        setSelectedSystemAudioDevice(device.deviceId);
-      }
-    }
-  }, [speaker1Source, speaker2Source, audioDevices]);
-
-  // 当设备列表和音频源配置都加载完成后，如果已选择设备但未保存配置，自动保存
-  // 使用 ref 来跟踪是否已经尝试过自动保存，避免重复执行
-  const autoSaveAttemptedRef = useRef({ mic: false, system: false });
-
   // 保存音频源配置（使用 useCallback 避免无限循环，但不依赖 audioSources）
   const saveAudioSource = useCallback(async (sourceName, deviceId, deviceName, isActive = true) => {
     try {
@@ -207,47 +179,45 @@ function Settings() {
     }
   }, []); // 移除 audioSources 依赖，改为在函数内部获取最新数据
 
+  // 用于跟踪是否已经自动保存过，避免重复保存
+  const autoSavedRef = useRef(false);
+
   useEffect(() => {
-    const autoSaveIfNeeded = async () => {
-      // 如果已选择麦克风设备，但没有保存配置，且还没有尝试过自动保存
-      if (selectedAudioDevice && audioDevices.length > 0 && !speaker1Source && !autoSaveAttemptedRef.current.mic) {
-        const device = audioDevices.find(d => d.deviceId === selectedAudioDevice);
-        if (device) {
-          autoSaveAttemptedRef.current.mic = true;
-          console.log('自动保存麦克风配置:', device.deviceId);
-          await saveAudioSource('用户（麦克风）', device.deviceId, device.label || device.deviceId, true);
+    loadConfigs();
+    // 先加载音频源配置，再加载设备列表（因为设备列表需要用到音频源配置）
+    loadAudioSources().then(() => {
+      loadAudioDevices();
+    });
+  }, []);
+
+  // 当音频源配置加载完成后，更新设备选择并自动保存
+  useEffect(() => {
+    const initializeAndSave = async () => {
+      // 如果speaker1Source存在但device_id为null，自动选择第一个可用设备并保存
+      if (speaker1Source && !speaker1Source.device_id && audioDevices.length > 0 && !autoSavedRef.current) {
+        const firstDevice = audioDevices[0];
+        console.log('自动选择并保存第一个麦克风设备:', firstDevice.deviceId);
+        setSelectedAudioDevice(firstDevice.deviceId);
+        // 标记为已保存，避免重复
+        autoSavedRef.current = true;
+        // 直接保存到数据库
+        await saveAudioSource('用户（麦克风）', firstDevice.deviceId, firstDevice.label || firstDevice.deviceId, true);
+      } else if (speaker1Source?.device_id && audioDevices.length > 0) {
+        const device = audioDevices.find(d => d.deviceId === speaker1Source.device_id);
+        if (device && selectedAudioDevice !== device.deviceId) {
+          setSelectedAudioDevice(device.deviceId);
         }
       }
-
-      // 如果已选择系统音频设备且已勾选，但没有保存配置，且还没有尝试过自动保存
-      if (captureSystemAudio && selectedSystemAudioDevice && audioDevices.length > 0 && !speaker2Source && !autoSaveAttemptedRef.current.system) {
-        const device = audioDevices.find(d => d.deviceId === selectedSystemAudioDevice);
-        if (device) {
-          autoSaveAttemptedRef.current.system = true;
-          console.log('自动保存系统音频配置:', device.deviceId);
-          await saveAudioSource('角色（系统音频）', device.deviceId, device.label || device.deviceId, true);
+      if (speaker2Source?.device_id && audioDevices.length > 0 && captureSystemAudio) {
+        const device = audioDevices.find(d => d.deviceId === speaker2Source.device_id);
+        if (device && selectedSystemAudioDevice !== device.deviceId) {
+          setSelectedSystemAudioDevice(device.deviceId);
         }
       }
     };
 
-    // 延迟执行，确保所有状态都已更新
-    if (audioDevices.length > 0 && (selectedAudioDevice || selectedSystemAudioDevice)) {
-      const timer = setTimeout(() => {
-        autoSaveIfNeeded();
-      }, 1000); // 增加延迟时间，确保状态稳定
-      return () => clearTimeout(timer);
-    }
-  }, [selectedAudioDevice, selectedSystemAudioDevice, audioDevices, speaker1Source, speaker2Source, captureSystemAudio]);
-
-  // 当 speaker1Source 或 speaker2Source 更新时，重置自动保存标志
-  useEffect(() => {
-    if (speaker1Source) {
-      autoSaveAttemptedRef.current.mic = false;
-    }
-    if (speaker2Source) {
-      autoSaveAttemptedRef.current.system = false;
-    }
-  }, [speaker1Source, speaker2Source]);
+    initializeAndSave();
+  }, [speaker1Source, speaker2Source, audioDevices, captureSystemAudio, saveAudioSource]);
 
   const loadAudioDevices = async () => {
     try {
@@ -294,7 +264,9 @@ function Settings() {
         setSelectedAudioDevice(speaker1.device_id || '');
       }
       if (speaker2) {
-        setCaptureSystemAudio(true);
+        // 根据 is_active 决定是否默认勾选系统音频捕获
+        const isActive = speaker2.is_active === 1 || speaker2.is_active === true || speaker2.is_active === '1';
+        setCaptureSystemAudio(isActive);
         setSelectedSystemAudioDevice(speaker2.device_id || '');
       }
     } catch (error) {
@@ -966,17 +938,32 @@ function Settings() {
                   onChange={async (e) => {
                     const checked = e.target.checked;
                     setCaptureSystemAudio(checked);
+
+                    // 统一通过 saveAudioSource 确保存在 speaker2 配置：
+                    // - 如果之前没有 speaker2Source，会自动创建
+                    // - 如果已有，则仅更新 is_active
+                    try {
+                      const deviceId =
+                        (speaker2Source && speaker2Source.device_id) ||
+                        selectedSystemAudioDevice ||
+                        'system-loopback';
+                      const deviceName =
+                        (speaker2Source && speaker2Source.device_name) ||
+                        '系统音频（屏幕捕获）';
+
+                      await saveAudioSource(
+                        '角色（系统音频）',
+                        deviceId,
+                        deviceName,
+                        checked
+                      );
+                    } catch (err) {
+                      console.error('更新系统音频源配置失败:', err);
+                    }
+
                     if (!checked) {
-                      // 如果取消选择，禁用音频源（但保留设备配置）
-                      if (speaker2Source && speaker2Source.device_id) {
-                        await saveAudioSource('角色（系统音频）', speaker2Source.device_id, speaker2Source.device_name, false);
-                      }
+                      // 关闭系统音频时清理错误提示
                       setDesktopCapturerError(null);
-                    } else {
-                      // 如果勾选，且之前有配置，恢复启用
-                      if (speaker2Source && speaker2Source.device_id) {
-                        await saveAudioSource('角色（系统音频）', speaker2Source.device_id, speaker2Source.device_name, true);
-                      }
                     }
                   }}
                   className="w-4 h-4 text-primary border-border-light dark:border-border-dark rounded focus:ring-primary"

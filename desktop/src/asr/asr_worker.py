@@ -67,15 +67,17 @@ os.environ.setdefault("TQDM_DISABLE", "1")
 SAMPLE_RATE = int(os.environ.get("ASR_SAMPLE_RATE", "16000"))
 
 # 【优化】滑动窗口配置
-WINDOW_SECONDS = float(os.environ.get("ASR_WINDOW_SECONDS", "8"))  # 识别窗口大小（秒）
-MIN_NEW_AUDIO_SECONDS = float(os.environ.get("ASR_MIN_NEW_AUDIO", "1.5"))  # 最少累积多少新音频才触发识别
+WINDOW_SECONDS = float(os.environ.get("ASR_WINDOW_SECONDS", "20"))  # 识别窗口大小（秒），增加到20秒以获得更好上下文
+MIN_NEW_AUDIO_SECONDS = float(os.environ.get("ASR_MIN_NEW_AUDIO", "0.5"))  # 降低触发阈值以提高响应速度
 MAX_BUFFER_SECONDS = float(os.environ.get("ASR_BUFFER_SECONDS", "30"))  # 最大缓冲（防止内存溢出）
+LOOKBACK_SECONDS = float(os.environ.get("ASR_LOOKBACK_SECONDS", "1.0"))  # 提交句子后保留的音频时长（秒）
+MIN_DECODE_SAMPLES = int(0.4 * 16000) # 最小解码采样数
 
 WINDOW_SAMPLES = int(WINDOW_SECONDS * SAMPLE_RATE)
 MIN_NEW_AUDIO_SAMPLES = int(MIN_NEW_AUDIO_SECONDS * SAMPLE_RATE)
 MAX_BUFFER_SAMPLES = int(MAX_BUFFER_SECONDS * SAMPLE_RATE)
 
-DEFAULT_MODEL_FALLBACK = "medium"
+DEFAULT_MODEL_FALLBACK = "base"
 
 # 分句配置
 SENTENCE_END_PUNCTUATION = set("。！？!?.；;")  # 句末标点
@@ -155,6 +157,10 @@ class SessionState:
     # 分句相关
     current_sentence: SentenceBuffer = field(default_factory=SentenceBuffer)
     sentence_start_time: float = 0.0  # 当前句子开始的时间戳
+
+    # 【新增】句子起始采样点 & 已提交文本长度（用于时长计算和增量对齐）
+    sentence_start_sample: int = 0  # 当前句子在整体音频中的起始采样点
+    committed_text_length: int = 0  # 已经作为完整句子提交的文本长度
     
     # 完整句子队列
     completed_sentences: List[str] = field(default_factory=list)
@@ -204,10 +210,11 @@ class SessionState:
         self.last_recognized_samples = self.total_samples
         self.last_recognized_text = text
 
-    def clear_for_new_sentence(self):
-        """清理状态，准备接收新句子"""
-        # 保留最近一点音频作为上下文
-        keep_samples = int(1.0 * SAMPLE_RATE)  # 保留1秒
+    def clear_audio_before(self, keep_seconds: float):
+        """
+        清理指定时间之前的音频，保留 keep_seconds 秒作为上下文
+        """
+        keep_samples = int(keep_seconds * SAMPLE_RATE)
         audio = self.build_audio()
         
         if audio is not None and len(audio) > keep_samples:
@@ -215,10 +222,15 @@ class SessionState:
             self.chunks = deque([tail])
             self.total_samples = keep_samples
         else:
-            self.chunks.clear()
-            self.total_samples = 0
+            # 如果音频总长度还不到 keep_seconds，则不清除
+            pass
         
-        self.last_recognized_samples = self.total_samples
+        # 重置识别状态，因为音频改变了
+        self.last_recognized_samples = 0
+        # last_recognized_text 不重置，用于去重？或者应该重置？
+        # 在滑动窗口逻辑中，last_recognized_text 用于计算 incremental text
+        # 当我们清除音频后，下一次识别是新的开始，但也可能包含重叠部分
+        # 为了简单起见，这里重置它，依靠 extract_incremental_text 处理重叠
         self.last_recognized_text = ""
         self.pending_text = ""
         self.current_sentence = SentenceBuffer()
@@ -351,7 +363,11 @@ def load_model() -> WhisperModel:
             raise hf_exc
 
 
-def transcribe_audio_with_segments(model: WhisperModel, audio_source) -> Tuple[str, List[dict], dict]:
+def transcribe_audio_with_segments(
+    model: WhisperModel, 
+    audio_source, 
+    initial_prompt: str = None
+) -> Tuple[str, List[dict], dict]:
     """
     转录音频并返回 segment 级别的信息
     返回: (完整文本, segments列表, info)
@@ -364,6 +380,7 @@ def transcribe_audio_with_segments(model: WhisperModel, audio_source) -> Tuple[s
         temperature=TEMPERATURE,
         vad_filter=VAD_FILTER,
         condition_on_previous_text=False,
+        initial_prompt=initial_prompt, # 【核心优化】传入上文提示
         no_speech_threshold=NO_SPEECH_THRESHOLD,
         word_timestamps=False,  # 关闭 word-level timestamps 以提高速度
     )
@@ -426,8 +443,18 @@ def handle_streaming_chunk(
     sys.stderr.write(f"[Worker] Starting transcription: session={session_id}, samples={len(audio_array)}, duration={audio_duration:.2f}s\n")
     sys.stderr.flush()
 
+    # 【核心优化】构造 initial_prompt
+    # 取最近的一句已完成句子作为 prompt
+    initial_prompt = None
+    if state.completed_sentences:
+        initial_prompt = state.completed_sentences[-1]
+        # 限制 prompt 长度，避免过长
+        if len(initial_prompt) > 200:
+            initial_prompt = initial_prompt[-200:]
+        sys.stderr.write(f"[Worker] Using initial_prompt: \"{initial_prompt}\"\n")
+
     try:
-        full_text, segments, info = transcribe_audio_with_segments(model, audio_array)
+        full_text, segments, info = transcribe_audio_with_segments(model, audio_array, initial_prompt=initial_prompt)
         sys.stderr.write(f"[Worker] Transcription result: text=\"{full_text[:50] if full_text else '(empty)'}...\", segments={len(segments)}\n")
         sys.stderr.flush()
     except Exception as exc:
@@ -520,6 +547,10 @@ def handle_streaming_chunk(
                 "language": info.language if hasattr(info, "language") else None,
                 "audio_duration": audio_duration,
             })
+            
+            # 【优化】记录已提交句子，用于下次 prompt
+            state.completed_sentences.append(sentence.strip())
+            
             # 清理已提交句子对应的音频
             state.clear_audio_before(LOOKBACK_SECONDS)
             state.sentence_start_sample = 0
@@ -622,6 +653,9 @@ def handle_force_commit(data: Dict, sessions_cache: Dict[str, SessionState]):
             "status": "success",
             "trigger": "silence_timeout",
         })
+        
+        # 【优化】记录已提交句子
+        state.completed_sentences.append(current_text)
         
         # 重置状态
         state.current_sentence = SentenceBuffer()

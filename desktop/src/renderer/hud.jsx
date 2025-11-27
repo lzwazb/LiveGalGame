@@ -319,11 +319,9 @@ function Hud() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [isDragging, setIsDragging] = useState(false);
   const [showSelector, setShowSelector] = useState(true);
   const [sessionInfo, setSessionInfo] = useState(null);
   const transcriptRef = useRef(null);
-  const dragStateRef = useRef({ dragging: false, startX: 0, startY: 0 });
   
   // 音量检测相关状态
   const [micVolumeLevel, setMicVolumeLevel] = useState(0);
@@ -551,43 +549,6 @@ function Hud() {
     };
   }, [sessionInfo]);
 
-  useEffect(() => {
-    const handleMouseMove = (event) => {
-      const api = window.electronAPI;
-      if (!dragStateRef.current.dragging || !api?.updateHUDDrag) return;
-      const pos = getPointerCoords(event);
-      api.updateHUDDrag(pos);
-    };
-
-    const handleMouseUp = () => {
-      if (!dragStateRef.current.dragging) return;
-      dragStateRef.current.dragging = false;
-      setIsDragging(false);
-      window.electronAPI?.endHUDDrag?.();
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-    window.addEventListener('mouseleave', handleMouseUp);
-
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-      window.removeEventListener('mouseleave', handleMouseUp);
-    };
-  }, []);
-
-  const handleDragStart = (event) => {
-    const api = window.electronAPI;
-    if (!api?.startHUDDrag) return;
-    const pos = getPointerCoords(event);
-    dragStateRef.current = { dragging: true, startX: pos.x, startY: pos.y };
-    setIsDragging(true);
-    api.startHUDDrag(pos);
-    event.preventDefault();
-    event.stopPropagation();
-  };
-
   const handleClose = () => {
     if (window.electronAPI?.closeHUD) {
       window.electronAPI.closeHUD();
@@ -807,8 +768,7 @@ function Hud() {
     <div className="hud-container">
       <header className="hud-header">
         <div
-          className={`hud-drag-zone ${isDragging ? 'hud-dragging' : ''}`}
-          onMouseDown={handleDragStart}
+          className="hud-drag-zone"
           title="拖拽HUD"
         >
           <span className="status-indicator" />

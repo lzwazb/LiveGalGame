@@ -24,7 +24,7 @@ class DatabaseManager {
 
     // 创建数据库连接
     this.db = new Database(this.dbPath, {
-      verbose: null // 关闭 SQL 语句打印，避免每次启动都输出数据库 schema
+      verbose: console.log // 关闭 SQL 语句打印，避免每次启动都输出数据库 schema
     });
 
     // 启用外键约束
