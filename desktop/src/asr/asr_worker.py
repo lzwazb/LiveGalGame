@@ -56,10 +56,40 @@ def send_ipc_message(data):
 # 环境变量配置
 # ==============================================================================
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
+
+def resolve_cpu_threads() -> int:
+    """Resolve how many CPU threads the decoder may use."""
+    env_value = os.environ.get("ASR_CPU_THREADS")
+    if env_value:
+        try:
+            parsed = int(env_value)
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
+    cpu_count = os.cpu_count() or 2
+    # Default to half the cores but at least 2 threads, up to 8 for safety.
+    return max(2, min(8, cpu_count // 2 or 1))
+
+
+CPU_THREADS = resolve_cpu_threads()
+DEFAULT_NUM_WORKERS = max(1, min(4, CPU_THREADS // 2 or 1))
+try:
+    NUM_WORKERS = int(os.environ.get("ASR_NUM_WORKERS", str(DEFAULT_NUM_WORKERS)))
+    if NUM_WORKERS <= 0:
+        raise ValueError
+except (TypeError, ValueError):
+    NUM_WORKERS = DEFAULT_NUM_WORKERS
+
+for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+    os.environ[var] = str(CPU_THREADS)
 os.environ.setdefault("TQDM_DISABLE", "1")
+
+HF_HOME = os.environ.get("HF_HOME")
+DEFAULT_CACHE_DIR = os.path.join(HF_HOME, "hub") if HF_HOME else os.path.expanduser("~/.cache/huggingface/hub")
+CACHE_DIR = os.environ.get("ASR_CACHE_DIR") or DEFAULT_CACHE_DIR
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 # ==============================================================================
 # ASR 配置（优化版）
@@ -124,8 +154,6 @@ BEAM_SIZE = int(os.environ.get("ASR_BEAM_SIZE", "5"))
 TEMPERATURE = float(os.environ.get("ASR_TEMPERATURE", "0.0"))
 VAD_FILTER = os.environ.get("ASR_VAD_FILTER", "1").lower() not in {"0", "false", "no"}
 NO_SPEECH_THRESHOLD = float(os.environ.get("ASR_NO_SPEECH_THRESHOLD", "0.6"))
-CACHE_DIR = os.environ.get("ASR_CACHE_DIR") or os.path.expanduser("~/.cache/faster-whisper")
-os.makedirs(CACHE_DIR, exist_ok=True)
 
 
 @dataclass
@@ -317,7 +345,11 @@ def split_by_sentence_end(text: str) -> Tuple[List[str], str]:
 def load_model() -> WhisperModel:
     model_name = resolve_model_name()
     sys.stderr.write(f"[ASR Worker] Loading model: {model_name} (Faster-Whisper)\n")
-    sys.stderr.write(f"[ASR Worker] Device={DEVICE}, compute_type={COMPUTE_TYPE}, cache={CACHE_DIR}\n")
+    sys.stderr.write(
+        "[ASR Worker] Device="
+        f"{DEVICE}, compute_type={COMPUTE_TYPE}, cache={CACHE_DIR}, "
+        f"cpu_threads={CPU_THREADS}, workers={NUM_WORKERS}\n"
+    )
     sys.stderr.flush()
 
     # 首先尝试从 HuggingFace 加载
@@ -329,6 +361,8 @@ def load_model() -> WhisperModel:
             device=DEVICE,
             compute_type=COMPUTE_TYPE,
             download_root=CACHE_DIR,
+            cpu_threads=CPU_THREADS,
+            num_workers=NUM_WORKERS,
         )
         sys.stderr.write("[ASR Worker] Model loaded from HuggingFace\n")
         sys.stderr.flush()
@@ -351,6 +385,8 @@ def load_model() -> WhisperModel:
                 device=DEVICE,
                 compute_type=COMPUTE_TYPE,
                 download_root=CACHE_DIR,
+                cpu_threads=CPU_THREADS,
+                num_workers=NUM_WORKERS,
             )
             sys.stderr.write("[ASR Worker] Model loaded from ModelScope\n")
             sys.stderr.flush()

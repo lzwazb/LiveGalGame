@@ -1,9 +1,11 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, screen, desktopCapturer, systemPreferences } from 'electron';
 import { initMain as initAudioLoopback } from 'electron-audio-loopback';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import DatabaseManager from './db/database.js';
 import ASRManager from './asr/asr-manager.js';
+import ASRModelManager from './asr/model-manager.js';
 
 // 初始化 electron-audio-loopback（必须在 app.whenReady 之前调用）
 initAudioLoopback();
@@ -33,6 +35,23 @@ const __dirname = path.dirname(__filename);
 let mainWindow;
 let hudWindow;
 let db;
+let modelManager;
+
+function ensureAsrCacheEnv() {
+  try {
+    const userData = app.getPath('userData');
+    if (!process.env.HF_HOME) {
+      process.env.HF_HOME = path.join(userData, 'hf-home');
+    }
+    fs.mkdirSync(process.env.HF_HOME, { recursive: true });
+    if (!process.env.ASR_CACHE_DIR) {
+      process.env.ASR_CACHE_DIR = path.join(process.env.HF_HOME, 'hub');
+    }
+    fs.mkdirSync(process.env.ASR_CACHE_DIR, { recursive: true });
+  } catch (error) {
+    console.error('[ASR] Failed to ensure cache directories:', error);
+  }
+}
 
 function createWindow() {
   // 创建浏览器窗口
@@ -520,6 +539,47 @@ function setupIPC() {
   });
 
   console.log('Database IPC handlers registered');
+
+  // ========== ASR 模型管理 IPC ==========
+  if (!modelManager) {
+    modelManager = new ASRModelManager();
+  }
+
+  ipcMain.handle('asr-get-model-presets', () => {
+    try {
+      return modelManager.getModelPresets();
+    } catch (error) {
+      console.error('Error getting ASR model presets:', error);
+      return [];
+    }
+  });
+
+  ipcMain.handle('asr-get-model-status', (event, modelId) => {
+    try {
+      return modelManager.getModelStatus(modelId);
+    } catch (error) {
+      console.error('Error getting ASR model status:', error);
+      return null;
+    }
+  });
+
+  ipcMain.handle('asr-download-model', (event, modelId) => {
+    try {
+      return modelManager.startDownload(modelId);
+    } catch (error) {
+      console.error('Error starting ASR model download:', error);
+      throw error;
+    }
+  });
+
+  ipcMain.handle('asr-cancel-model-download', (event, modelId) => {
+    try {
+      return modelManager.cancelDownload(modelId);
+    } catch (error) {
+      console.error('Error cancelling ASR model download:', error);
+      throw error;
+    }
+  });
 
   // ========== ASR（语音识别）IPC处理器 ==========
 
@@ -1042,6 +1102,7 @@ function registerGlobalShortcuts() {
 
 // 应用准备就绪
 app.whenReady().then(async () => {
+  ensureAsrCacheEnv();
   setupIPC(); // 确保IPC监听器只注册一次
   
   // macOS: 应用启动时请求麦克风权限
