@@ -1,7 +1,9 @@
 import electron from 'electron';
+import { randomUUID } from 'crypto';
 import DatabaseManager from '../../db/database.js';
 import ASRManager from '../../asr/asr-manager.js';
 import ASRModelManager from '../../asr/model-manager.js';
+import AgentService from '../../agent/agent-service.js';
 
 const { ipcMain, systemPreferences } = electron;
 
@@ -17,6 +19,7 @@ export class IPCManager {
     this.asrModelPreloading = false;
     this.asrModelPreloaded = false;
     this.asrServerCrashCallback = null;
+    this.agentService = null;
   }
 
   /**
@@ -62,6 +65,7 @@ export class IPCManager {
     this.setupWindowHandlers();
     this.setupDatabaseHandlers();
     this.setupLLMHandlers();
+    this.setupAgentHandlers();
     this.setupASRModelHandlers();
     this.setupASRAudioHandlers();
     this.setupMediaHandlers();
@@ -429,6 +433,46 @@ export class IPCManager {
   }
 
   /**
+   * 设置 Agent / LLM 推理相关 IPC 处理器
+   */
+  setupAgentHandlers() {
+    ipcMain.handle('agent-run', async (event, payload = {}) => {
+      try {
+        const svc = this.getOrCreateAgentService();
+        const result = await svc.run(payload, { stream: false });
+        return result;
+      } catch (error) {
+        console.error('[Agent] run error:', error);
+        return { error: error.message || 'agent run failed' };
+      }
+    });
+
+    ipcMain.handle('agent-run-stream', async (event, payload = {}) => {
+      const requestId = payload.requestId || randomUUID();
+      try {
+        const svc = this.getOrCreateAgentService();
+        await svc.run(payload, {
+          stream: true,
+          requestId,
+          onStream: (chunk) => {
+            try {
+              event.sender.send('agent-stream', { requestId, ...chunk });
+            } catch (err) {
+              console.error('[Agent] failed to forward stream chunk:', err);
+            }
+          }
+        });
+        return { requestId };
+      } catch (error) {
+        console.error('[Agent] stream error:', error);
+        return { requestId, error: error.message || 'agent stream failed' };
+      }
+    });
+
+    console.log('Agent IPC handlers registered');
+  }
+
+  /**
    * 设置 ASR 模型管理相关 IPC 处理器
    */
   setupASRModelHandlers() {
@@ -779,6 +823,16 @@ export class IPCManager {
   }
 
   /**
+   * 获取或创建 Agent 服务
+   */
+  getOrCreateAgentService() {
+    if (!this.agentService) {
+      this.agentService = new AgentService();
+    }
+    return this.agentService;
+  }
+
+  /**
    * 检查 ASR 模型是否就绪
    */
   async checkASRReady() {
@@ -870,6 +924,14 @@ export class IPCManager {
         this.asrManager.destroy();
       } catch (error) {
         console.error('Error destroying ASR manager:', error);
+      }
+    }
+
+    if (this.agentService) {
+      try {
+        this.agentService.destroy();
+      } catch (error) {
+        console.error('Error destroying Agent service:', error);
       }
     }
   }
