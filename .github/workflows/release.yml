@@ -142,7 +142,7 @@ jobs:
       - name: Extract version information
         id: version
         run: |
-          VERSION_NAME=$(grep 'versionName = ' app/build.gradle.kts | sed 's/.*versionName = "\(.*\)"/\1/')
+          VERSION_NAME=$(grep 'versionName = ' mobile/app/build.gradle.kts | sed 's/.*versionName = "\(.*\)"/\1/')
           echo "VERSION_NAME=${VERSION_NAME}" >> $GITHUB_OUTPUT
 
       - name: Download APK artifact
