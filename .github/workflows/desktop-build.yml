@@ -81,6 +81,9 @@ jobs:
           node -e "const v=require('./package.json').version; console.log('app_version='+v)" >> "$GITHUB_OUTPUT"
 
       - name: Build desktop package
+        env:
+          PYTHON: python3.10
+          ASR_IMPL: funasr
         run: |
           if [ "${{ matrix.platform }}" = "mac" ]; then
             pnpm run build:mac -- --${{ matrix.arch }}

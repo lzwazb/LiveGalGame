@@ -43,7 +43,7 @@ function detectPython() {
     try {
       const v = execSync(`"${cmd}" -c "import sys;print(sys.version)"`, { encoding: 'utf-8' }).trim();
       const [major, minor] = v.split('.')[0] ? v.split('.').map((n) => parseInt(n, 10)) : [0, 0];
-      if (major === 3 && minor >= 8 && minor <= 13) {
+      if (major === 3 && minor >= 8 && minor <= 12) {
         console.log(`[prepare-python-env] using python: ${cmd} (version ${major}.${minor})`);
         return cmd;
       }
@@ -58,7 +58,7 @@ function detectPython() {
 function bootstrapMiniforge() {
   if (process.platform !== 'darwin') {
     throw new Error(
-      `[prepare-python-env] 找不到可用的 Python，请安装 3.10~3.13 并设置环境变量 PYTHON 指向该解释器（当前尝试: ${candidateCmds.join(', ')})`
+      `[prepare-python-env] 找不到可用的 Python，请安装 3.10~3.12 并设置环境变量 PYTHON 指向该解释器（当前尝试: ${candidateCmds.join(', ')})`
     );
   }
 
@@ -88,10 +88,17 @@ function bootstrapMiniforge() {
     console.log('[prepare-python-env] Miniforge installer already downloaded');
   }
 
+  // 解除 macOS 安全属性，避免 “Operation not permitted”
+  try {
+    run(`xattr -d com.apple.quarantine "${installerPath}"`, { stdio: 'ignore' });
+  } catch {
+    // ignore
+  }
+
   const prefix = path.join(bootstrapDir, 'miniforge');
   if (!fs.existsSync(path.join(prefix, 'bin', 'python'))) {
     console.log('[prepare-python-env] installing Miniforge (py310)...');
-    run(`"${installerPath}" -b -p "${prefix}"`);
+    run(`bash "${installerPath}" -b -p "${prefix}"`);
   } else {
     console.log('[prepare-python-env] Miniforge already installed');
   }
