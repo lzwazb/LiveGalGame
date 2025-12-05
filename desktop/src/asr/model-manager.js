@@ -340,7 +340,7 @@ export default class ASRModelManager extends EventEmitter {
     }
   }
 
-  startDownload(modelId, source = 'huggingface') {
+  startDownload(modelId, source = 'huggingface', allowFallback = true) {
     if (this.activeDownloads.has(modelId)) {
       return { status: 'running' };
     }
@@ -436,7 +436,19 @@ export default class ASRModelManager extends EventEmitter {
           status,
         });
       } else {
-        console.error(`[ASR ModelManager] Download failed: modelId=${modelId}, code=${code}`);
+        console.error(`[ASR ModelManager] Download failed: modelId=${modelId}, code=${code}, source=${source}`);
+
+        // 失败且具备 ModelScope 资源时自动回退一次
+        if (allowFallback && source === 'huggingface' && preset.modelScopeRepoId) {
+          console.warn(`[ASR ModelManager] Falling back to ModelScope for ${modelId}`);
+          this.broadcast('asr-model-download-log', {
+            modelId,
+            repoId,
+            message: 'HuggingFace 下载失败，尝试使用 ModelScope 源...'
+          });
+          return this.startDownload(modelId, 'modelscope', false);
+        }
+
         this.broadcast('asr-model-download-error', {
           modelId,
           repoId: repoId,
