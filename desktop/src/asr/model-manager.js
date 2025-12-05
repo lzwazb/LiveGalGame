@@ -115,10 +115,24 @@ export default class ASRModelManager extends EventEmitter {
     if (envPython && fs.existsSync(envPython)) {
       return envPython;
     }
+    const resourcesPath = process.resourcesPath;
     const projectRoot = app.isPackaged
-      ? path.join(process.resourcesPath, '..')
+      ? path.join(resourcesPath || app.getAppPath(), '..')
       : app.getAppPath();
+
+    // 优先使用打包内置的 python-env（extraResources）
+    const bundledPython = process.platform === 'win32'
+      ? path.join(resourcesPath || '', 'python-env', 'Scripts', 'python.exe')
+      : path.join(resourcesPath || '', 'python-env', 'bin', 'python3');
+
+    // 开发/调试：使用仓库下的 python-env/.venv
+    const repoPythonEnv = process.platform === 'win32'
+      ? path.join(projectRoot, 'python-env', 'Scripts', 'python.exe')
+      : path.join(projectRoot, 'python-env', 'bin', 'python3');
+
     const candidates = [
+      bundledPython,
+      repoPythonEnv,
       path.join(projectRoot, '.venv', 'bin', 'python'),
       path.join(projectRoot, '.venv', 'Scripts', 'python.exe'),
       'python3',
