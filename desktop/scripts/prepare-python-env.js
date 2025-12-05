@@ -111,10 +111,11 @@ function bootstrapMiniforge() {
 function ensureVenv(pythonCmd) {
   if (fs.existsSync(pythonPath)) {
     console.log(`[prepare-python-env] venv already exists: ${pythonPath}`);
-    return;
+    // 不 return，继续往下走以确保依赖最新
+  } else {
+    console.log(`[prepare-python-env] creating venv via ${pythonCmd} -m venv "${venvDir}"`);
+    run(`"${pythonCmd}" -m venv "${venvDir}"`);
   }
-  console.log(`[prepare-python-env] creating venv via ${pythonCmd} -m venv "${venvDir}"`);
-  run(`"${pythonCmd}" -m venv "${venvDir}"`);
 }
 
 function installDeps() {
