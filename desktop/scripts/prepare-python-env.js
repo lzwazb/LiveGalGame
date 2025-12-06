@@ -143,8 +143,8 @@ function ensureVenv(pythonCmd, { forceRebuild = false } = {}) {
     return;
   }
 
-  console.log(`[prepare-python-env] creating venv via ${pythonCmd} -m venv "${venvDir}"`);
-  run(`"${pythonCmd}" -m venv "${venvDir}"`);
+    console.log(`[prepare-python-env] creating venv via ${pythonCmd} -m venv "${venvDir}"`);
+    run(`"${pythonCmd}" -m venv "${venvDir}"`);
 }
 
 function installDeps() {
@@ -252,9 +252,9 @@ function main() {
     packCondaEnv();
     fixPythonSymlinks();
   } else {
-    ensureVenv(pythonCmd, { forceRebuild });
-    installDeps();
-    fixPythonSymlinks();
+  ensureVenv(pythonCmd, { forceRebuild });
+  installDeps();
+  fixPythonSymlinks();
   }
   console.log('[prepare-python-env] done');
 }
