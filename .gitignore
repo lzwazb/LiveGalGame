@@ -27,4 +27,11 @@ signing.properties
 /desktop/data
 /desktop/.temp
 /desktop/tests
+.venv
+/desktop/memory-service/.venv
+/desktop/memory-service/__pycache__
+__pycache__/
+.venv
+/desktop/memory-service/.venv
+/desktop/memory-service/__pycache__
 .cursor
