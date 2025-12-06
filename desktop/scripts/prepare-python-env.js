@@ -20,6 +20,7 @@ const venvDir = path.join(projectRoot, 'python-env');
 const requirementsPath = path.join(projectRoot, 'requirements.txt');
 
 const isWin = process.platform === 'win32';
+const isMac = process.platform === 'darwin';
 const desiredPy = process.env.PYTHON_VERSION || '3.10';
 const candidateCmds = [
   process.env.PYTHON,
@@ -108,13 +109,18 @@ function bootstrapMiniforge() {
   return bundledPy;
 }
 
-function ensureVenv(pythonCmd) {
+function ensureVenv(pythonCmd, { forceRebuild = false } = {}) {
+  if (fs.existsSync(venvDir) && forceRebuild) {
+    console.log(`[prepare-python-env] removing existing venv for rebuild: ${venvDir}`);
+    fs.rmSync(venvDir, { recursive: true, force: true });
+  }
+
   if (fs.existsSync(pythonPath)) {
     console.log(`[prepare-python-env] venv already exists: ${pythonPath}`);
     // 不 return，继续往下走以确保依赖最新
   } else {
-  console.log(`[prepare-python-env] creating venv via ${pythonCmd} -m venv "${venvDir}"`);
-  run(`"${pythonCmd}" -m venv "${venvDir}"`);
+    console.log(`[prepare-python-env] creating venv via ${pythonCmd} -m venv "${venvDir}"`);
+    run(`"${pythonCmd}" -m venv "${venvDir}"`);
   }
 }
 
@@ -185,19 +191,20 @@ function fixPythonSymlinks() {
 
 function main() {
   // CI 场景强制使用 Miniforge，避免使用系统 Framework Python 导致打包后动态链接失效
-  const forceMiniforge = process.platform === 'darwin' && process.env.CI === 'true';
+  const forceMiniforge = isMac && process.env.CI === 'true';
+  const forceRebuild = forceMiniforge || process.env.FORCE_REBUILD_VENV === 'true';
 
   let pythonCmd = forceMiniforge ? null : detectPython();
 
   // 如果检测到的 python 是 macOS Framework 路径，也切换到 Miniforge
-  const isMacFrameworkPython = pythonCmd && process.platform === 'darwin' &&
+  const isMacFrameworkPython = pythonCmd && isMac &&
     pythonCmd.includes('/Library/Frameworks/Python.framework');
 
   if (!pythonCmd || forceMiniforge || isMacFrameworkPython) {
     pythonCmd = bootstrapMiniforge();
   }
 
-  ensureVenv(pythonCmd);
+  ensureVenv(pythonCmd, { forceRebuild });
   installDeps();
   // 修复 venv 符号链接，确保打包后可用
   fixPythonSymlinks();
