@@ -128,6 +128,68 @@ browser_click({ element: "in progress: Run ...", ref: "e211" })
   run: pnpm run build:mac # 内部调用 prepare-python-env.js
 ```
 
+## 实操示例：从最新失败的 Action 中提取详细错误（mac 构建）
+
+以下示例基于 `feat/desktop-branch` 最新一次失败的 Run（#31，commit `e2684c9`），演示如何迅速获取最关键的错误日志：
+
+1) 打开 Action 列表  
+   - 访问 `https://github.com/JStone2934/LiveGalGame/actions`，找到最新一条失败的记录（红色 failed）。
+
+2) 进入对应 Run  
+   - 点击失败记录，进入详情页后在 “Jobs” 中选择 `Desktop mac (arm64)`（或 x64）。
+
+3) 若网页日志加载不便，可用 GitHub API 直接抓取日志并定位错误  
+   - 下载日志（需要 GH_TOKEN，参考 `docs/asr-ci-regression.md`）：  
+     ```bash
+     cd /Users/cccmmmdd/LiveGalGame
+     curl -L -H "Authorization: Bearer $GH_TOKEN" \
+       -o /tmp/run-19983014012.log \
+       https://api.github.com/repos/JStone2934/LiveGalGame/actions/runs/19983014012/logs
+     cd /tmp && unzip -o run-19983014012.log -d run-19983014012-logs
+     tail -n 120 "run-19983014012-logs/0_Desktop mac (arm64).txt"
+     ```
+   - 关键报错（摘录）：  
+     ```
+     error    libmamba Could not solve for environment specs
+       └─ faster-whisper =0.10 * does not exist (perhaps a typo or a missing channel).
+     Error: Command failed: .../mamba install -y -p ... ffmpeg av=10.* faster-whisper=0.10.*
+     ```
+   - 结论：conda-forge 没有 `faster-whisper=0.10.*` 的包，mamba 解算失败，`prepare-python-env.js` 随之退出。
+
+4) 修复方向（供后续操作参考）  
+   - 方案 A：改为 pip 安装 faster-whisper，conda 仅装 ffmpeg/av。  
+   - 方案 B：在 conda-forge 可用的版本范围内调整 faster-whisper 版本约束。  
+   - 方案 C：去掉 mamba 对 faster-whisper 的安装，仅保留 pip 安装。
+
+### 最新经验（2025-12-06）
+- mac 构建依赖匹配：`faster-whisper==0.10.0` 预编译轮子使用 `av` 10.x，已在 `requirements.txt` 固定 `av==10.0.0`，`prepare-python-env.js` 中 mamba 只安装 `ffmpeg` + `av==10.0.0`，`faster-whisper` 由 pip 安装（同时锁 `numpy<2`）可避免解算/ABI 冲突。
+- 日志/模型下载前务必先开启代理：在 Runner 或本地执行 `dl1` 启用代理后再跑 curl/pip/HF 下载，否则可能超时或 SOCKS 依赖缺失导致模型注册失败。
+- 若 GitHub 日志直链下载报 HTTP2 framing 错误，可尝试加 `--http1.1`：`curl --http1.1 -L -o run.log https://api.github.com/.../logs`。
+
+## 持续迭代的循环操作指南
+
+当你需要多轮修复 / 回归时，按以下闭环重复：
+
+1) 做出最小必要改动并提交  
+   - 只提交与修复相关的文件，避免把大体积缓存目录（如 `python-bootstrap/`、`__pycache__`）加入版本库。  
+   - 推送到对应分支，触发 Actions。
+
+2) 监控最新一次 Run  
+   - Actions 列表页找到最新记录（状态可能是 queued/in progress/failed）。  
+   - 若失败，点击进入对应 Run，锁定失败的 macOS Job。
+
+3) 获取并阅读日志  
+   - 优先看网页日志；若加载慢，用 API 下载压缩日志并解压。  
+   - 关注最后的错误段落，通常在尾部能看到最直接的报错。
+
+4) 分析并收敛修复  
+   - 判断是依赖解算、编译缺库、脚本逻辑或环境版本问题。  
+   - 在源码/脚本里做最小修正，再次提交、推送。
+
+5) 循环直到绿色  
+   - 每轮只解决当前最致命的失败点。  
+   - 构建转绿后，检查 Artifacts，必要时下载做回归运行（参考 `docs/asr-ci-regression.md`）。
+
 ## 总结
 
 通过 **Browser 浏览日志 -> Codebase 定位配置 -> 逻辑一致性分析** 的闭环流程，我们能够快速识别出 CI 配置与实际构建脚本之间的冲突。
