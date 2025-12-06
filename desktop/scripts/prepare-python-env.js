@@ -184,10 +184,19 @@ function fixPythonSymlinks() {
 }
 
 function main() {
-  let pythonCmd = detectPython();
-  if (!pythonCmd) {
+  // CI 场景强制使用 Miniforge，避免使用系统 Framework Python 导致打包后动态链接失效
+  const forceMiniforge = process.platform === 'darwin' && process.env.CI === 'true';
+
+  let pythonCmd = forceMiniforge ? null : detectPython();
+
+  // 如果检测到的 python 是 macOS Framework 路径，也切换到 Miniforge
+  const isMacFrameworkPython = pythonCmd && process.platform === 'darwin' &&
+    pythonCmd.includes('/Library/Frameworks/Python.framework');
+
+  if (!pythonCmd || forceMiniforge || isMacFrameworkPython) {
     pythonCmd = bootstrapMiniforge();
   }
+
   ensureVenv(pythonCmd);
   installDeps();
   // 修复 venv 符号链接，确保打包后可用
