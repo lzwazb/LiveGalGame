@@ -176,6 +176,18 @@ function ensureCondaPackInstalled(miniforgePython) {
   run(`"${miniforgePython}" -m pip install --upgrade conda-pack`);
 }
 
+function installCondaPackages(packages) {
+  const mambaBin = path.join(miniforgePrefix, isWin ? 'Scripts' : 'bin', isWin ? 'mamba.exe' : 'mamba');
+  const condaBin = path.join(miniforgePrefix, isWin ? 'Scripts' : 'bin', isWin ? 'conda.exe' : 'conda');
+  const installer = fs.existsSync(mambaBin) ? mambaBin : condaBin;
+  if (!fs.existsSync(installer)) {
+    throw new Error('[prepare-python-env] neither mamba nor conda found');
+  }
+  const pkgList = packages.join(' ');
+  console.log(`[prepare-python-env] conda installing packages: ${pkgList}`);
+  run(`"${installer}" install -y -p "${venvDir}" -c conda-forge ${pkgList}`);
+}
+
 function packCondaEnv() {
   const tarPath = `${venvDir}.tar.gz`;
   console.log(`[prepare-python-env] packing env with conda-pack -> ${tarPath}`);
@@ -248,6 +260,11 @@ function main() {
   if (isMac) {
     ensureCondaEnv(pythonCmd, { forceRebuild });
     ensureCondaPackInstalled(pythonCmd);
+    installCondaPackages([
+      'ffmpeg',
+      'av=10.*',
+      'faster-whisper=0.10.*',
+    ]);
     installDeps();
     packCondaEnv();
     fixPythonSymlinks();
