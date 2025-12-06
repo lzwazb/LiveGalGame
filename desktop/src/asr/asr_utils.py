@@ -5,7 +5,7 @@ from typing import List, Tuple, Optional
 import numpy as np
 
 try:
-    from faster_whisper import WhisperModel
+from faster_whisper import WhisperModel
 except ImportError:
     WhisperModel = None
 
