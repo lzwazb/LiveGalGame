@@ -75,6 +75,7 @@ function ASRSettings() {
               modelId: payload.modelId,
               activeDownload: true,
               bytesPerSecond: 0,
+              lastError: null, // 清除上一次错误
             },
           };
         });
@@ -110,6 +111,7 @@ function ASRSettings() {
             ...(status.modelId ? status : { ...status, modelId: payload.modelId }),
             bytesPerSecond: 0,
             activeDownload: false,
+            lastError: null,
           },
         }));
       }));
@@ -117,6 +119,9 @@ function ASRSettings() {
 
     if (api.onAsrModelDownloadError) {
       cleanups.push(api.onAsrModelDownloadError((payload) => {
+        const reason =
+          payload?.message ||
+          (payload?.code ? `进程退出码 ${payload.code}${payload?.signal ? `, 信号 ${payload.signal}` : ''}` : '未知错误');
         setModelStatuses((prev) => {
           const previous = prev[payload.modelId] || { modelId: payload.modelId };
           return {
@@ -125,9 +130,11 @@ function ASRSettings() {
               ...previous,
               modelId: payload.modelId,
               activeDownload: false,
+              lastError: reason,
             },
           };
         });
+        alert(`下载模型失败：${reason}`);
       }));
     }
 
@@ -179,6 +186,18 @@ function ASRSettings() {
   };
 
   const handleDownloadModel = async (modelId) => {
+    // 先标记前端状态，按钮/文案立刻反馈，便于“继续下载”场景
+    setModelStatuses((prev) => ({
+      ...prev,
+      [modelId]: {
+        ...(prev[modelId] || { modelId }),
+        modelId,
+        activeDownload: true,
+        lastError: null,
+        bytesPerSecond: 0,
+      },
+    }));
+
     try {
       const api = window.electronAPI;
       if (!api?.asrDownloadModel) {
@@ -187,6 +206,15 @@ function ASRSettings() {
       await api.asrDownloadModel(modelId, downloadSource);
     } catch (err) {
       console.error('下载模型失败：', err);
+      setModelStatuses((prev) => ({
+        ...prev,
+        [modelId]: {
+          ...(prev[modelId] || { modelId }),
+          modelId,
+          activeDownload: false,
+          lastError: err.message || '未知错误',
+        },
+      }));
       alert('下载模型失败：' + (err.message || '未知错误'));
     }
   };

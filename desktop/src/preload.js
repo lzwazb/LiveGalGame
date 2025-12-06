@@ -130,7 +130,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   asrGetModelPresets: () => ipcRenderer.invoke('asr-get-model-presets'),
   asrGetModelStatus: (modelId) => ipcRenderer.invoke('asr-get-model-status', modelId),
   asrGetAllModelStatuses: () => ipcRenderer.invoke('asr-get-all-model-statuses'),
-  asrDownloadModel: (modelId) => ipcRenderer.invoke('asr-download-model', modelId),
+  // 下载 ASR 模型，允许指定下载源（huggingface / modelscope）
+  asrDownloadModel: (modelId, source) => ipcRenderer.invoke('asr-download-model', modelId, source),
   asrCancelModelDownload: (modelId) => ipcRenderer.invoke('asr-cancel-model-download', modelId),
   asrGetConfigs: () => ipcRenderer.invoke('asr-get-configs'),
   asrCreateConfig: (configData) => ipcRenderer.invoke('asr-create-config', configData),

@@ -83,10 +83,20 @@ function getModelScopeRepoPath(cacheDir, repoId) {
 export default class ASRModelManager extends EventEmitter {
   constructor() {
     super();
-    // Primary cache directory (app-specific or configured)
-    this.cacheDir = process.env.ASR_CACHE_DIR
-      || (process.env.HF_HOME ? path.join(process.env.HF_HOME, 'hub') : path.join(app.getPath('userData'), 'hf-home', 'hub'));
-    fs.mkdirSync(this.cacheDir, { recursive: true });
+    // 应用级缓存根目录（可通过环境变量覆盖）
+    this.appCacheBase = process.env.ASR_CACHE_BASE || path.join(app.getPath('userData'), 'asr-cache');
+    this.hfHome = process.env.HF_HOME || path.join(this.appCacheBase, 'hf-home');
+    this.msCache = process.env.MODELSCOPE_CACHE || path.join(this.appCacheBase, 'modelscope', 'hub');
+
+    // Primary cache directory (共享给 HF 默认 hub)
+    this.cacheDir = process.env.ASR_CACHE_DIR || path.join(this.hfHome, 'hub');
+    try {
+      fs.mkdirSync(this.cacheDir, { recursive: true });
+      fs.mkdirSync(this.hfHome, { recursive: true });
+      fs.mkdirSync(this.msCache, { recursive: true });
+    } catch {
+      // ignore mkdir errors
+    }
 
     // Also check system default HuggingFace cache (where faster-whisper actually downloads models)
     this.systemHfCache = path.join(os.homedir(), '.cache', 'huggingface', 'hub');
@@ -96,6 +106,7 @@ export default class ASRModelManager extends EventEmitter {
     // List of cache directories to check (in priority order)
     this.cacheDirs = [
       this.cacheDir,           // App-configured cache
+      this.msCache,            // App ModelScope cache
       this.systemHfCache,      // System default HF cache
       this.systemMsCache       // System default ModelScope cache
     ].filter(dir => {
@@ -362,9 +373,13 @@ export default class ASRModelManager extends EventEmitter {
 
     console.log(`[ASR ModelManager] Spawn command: ${pythonExecutable} ${args.join(' ')}`);
 
+    const hfHomeEnv = this.hfHome || process.env.HF_HOME;
+    const msCacheEnv = this.msCache || process.env.MODELSCOPE_CACHE;
     const env = {
       ...process.env,
       ASR_CACHE_DIR: this.cacheDir,
+      HF_HOME: hfHomeEnv,
+      MODELSCOPE_CACHE: msCacheEnv,
       PYTHONIOENCODING: 'utf-8',
     };
     const child = spawn(pythonExecutable, args, { env });
@@ -465,11 +480,26 @@ export default class ASRModelManager extends EventEmitter {
         ctx.snapshotPath = path.isAbsolute(payload.snapshotRelativePath)
           ? payload.snapshotRelativePath
           : path.join(this.cacheDir, payload.snapshotRelativePath);
+
+        // ModelScope 下载的落盘路径可能与 cacheDir 结构不同，尝试解析实际目录
+        if (payload.source === 'modelscope') {
+          const resolvedMsPath =
+            getModelScopeRepoPath(this.cacheDir, ctx.repoId) ||
+            getModelScopeRepoPath(this.msCache, ctx.repoId) ||
+            getModelScopeRepoPath(this.systemMsCache, ctx.repoId) ||
+            getModelScopeRepoPath(this.systemHfCache, ctx.repoId);
+          if (resolvedMsPath) {
+            ctx.snapshotPath = resolvedMsPath;
+          }
+        }
       }
       if (!ctx.timer) {
         ctx.timer = setInterval(() => this.emitProgress(ctx), 1000);
       }
     } else if (payload.event === 'completed') {
+      if (payload.localDir) {
+        ctx.snapshotPath = payload.localDir;
+      }
       this.emitProgress(ctx, true);
     } else if (payload.event === 'error') {
       this.broadcast('asr-model-download-error', {
@@ -556,4 +586,3 @@ export default class ASRModelManager extends EventEmitter {
     });
   }
 }
-

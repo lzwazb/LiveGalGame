@@ -19,6 +19,7 @@ export function ASRModelCard({
   const updatedAt = status.updatedAt ? new Date(status.updatedAt).toLocaleString() : null;
   const progressVisible = totalBytes > 0 && (activeDownload || (downloadedBytes > 0 && !isDownloaded));
   const engine = preset.engine || 'faster-whisper';
+  const canResume = !isDownloaded && downloadedBytes > 0 && !activeDownload;
 
   return (
     <div
@@ -64,6 +65,11 @@ export function ASRModelCard({
             <span className="material-symbols-outlined mr-1 text-sm">check_circle</span>
             <span>本地可用{updatedAt ? ` · 更新于 ${updatedAt}` : ''}</span>
           </div>
+        ) : status.lastError ? (
+          <div className="flex items-start text-red-600">
+            <span className="material-symbols-outlined mr-1 text-sm">error</span>
+            <span>上次下载失败：{status.lastError}</span>
+          </div>
         ) : (
           <div className="text-gray-500">
             {activeDownload ? '正在下载模型...' : '尚未下载，点击下方按钮开始下载'}
@@ -105,7 +111,7 @@ export function ASRModelCard({
             disabled={activeDownload || modelsLoading}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
           >
-            {activeDownload ? '下载中...' : '下载模型'}
+            {activeDownload ? '下载中...' : canResume ? '继续下载' : '下载模型'}
           </button>
         )}
 
@@ -121,5 +127,4 @@ export function ASRModelCard({
     </div>
   );
 }
-
 
