@@ -12,6 +12,7 @@ import time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import uvicorn
+from starlette.websockets import WebSocketState
 
 
 # ---------------------------------------------------------------------------
@@ -143,11 +144,19 @@ class WorkerBridge:
 
     async def stop(self):
         if self.process:
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(self.process.wait(), timeout=10)
-            except asyncio.TimeoutError:
-                self.process.kill()
+            # 进程可能已提前退出，先检查 returncode，避免重复 terminate 触发 ProcessLookupError
+            if self.process.returncode is None:
+                try:
+                    self.process.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(self.process.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    try:
+                        self.process.kill()
+                    except ProcessLookupError:
+                        pass
         if self.stdout_task:
             self.stdout_task.cancel()
         self.process = None
@@ -279,7 +288,12 @@ async def ws_transcribe(websocket: WebSocket, session_id: str):
             await bridge.reset_session(session_id)
         except Exception:
             pass
-        await websocket.close()
+        # 客户端已断开时避免重复发送 close 触发 RuntimeError
+        if websocket.application_state != WebSocketState.DISCONNECTED:
+            try:
+                await websocket.close()
+            except RuntimeError:
+                pass
 
 
 def main():

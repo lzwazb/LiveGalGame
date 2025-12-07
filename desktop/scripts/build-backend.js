@@ -1,5 +1,7 @@
 /**
  * Build Python backend (FastAPI + workers) via PyInstaller.
+ * - Windows: onefile exe（保持与参考项目一致，打包后仅有 exe，无需额外 Python 运行时）
+ * - macOS/Linux: 继续使用 onedir（兼容现有流程）
  */
 import fs from 'fs';
 import { execSync } from 'child_process';
@@ -34,6 +36,7 @@ const backendDir = path.join(projectRoot, 'backend');
 const distDir = path.join(backendDir, 'dist');
 const buildDir = path.join(backendDir, 'build');
 const entryFile = path.join(backendDir, 'main.py');
+const isWin = process.platform === 'win32';
 
 function run(cmd) {
   execSync(cmd, { stdio: 'inherit', cwd: projectRoot });
@@ -48,8 +51,7 @@ function main() {
   console.log(`[build-backend] entry: ${entryFile}`);
   ensureDirs();
 
-  // 使用 onedir 方便 electron-builder extraResources 打包
-  const cmd = [
+  const baseArgs = [
     `"${pythonCmd}"`,
     '-m PyInstaller',
     '--clean',
@@ -57,11 +59,31 @@ function main() {
     '--name asr-backend',
     `--distpath "${distDir}"`,
     `--workpath "${buildDir}"`,
-    '--onedir',
-    `"${entryFile}"`,
-  ].join(' ');
+  ];
+
+  // Windows 改为 onefile，保持最终产物单一 exe；其他平台沿用 onedir
+  const modeArgs = isWin ? ['--onefile', '--noconsole'] : ['--onedir'];
+
+  const cmd = [...baseArgs, ...modeArgs, `"${entryFile}"`].join(' ');
 
   run(cmd);
+
+  // 将 Windows onefile exe 归档到 dist/asr-backend 下，维持现有资源路径
+  if (isWin) {
+    const exeSrc = path.join(distDir, 'asr-backend.exe');
+    const targetDir = path.join(distDir, 'asr-backend');
+    const exeDst = path.join(targetDir, 'asr-backend.exe');
+
+    if (fs.existsSync(exeSrc)) {
+      fs.rmSync(targetDir, { recursive: true, force: true });
+      fs.mkdirSync(targetDir, { recursive: true });
+      fs.renameSync(exeSrc, exeDst);
+      console.log(`[build-backend] packaged onefile exe -> ${exeDst}`);
+    } else {
+      console.warn(`[build-backend] expected exe not found: ${exeSrc}`);
+    }
+  }
+
   console.log('[build-backend] done');
 }
 

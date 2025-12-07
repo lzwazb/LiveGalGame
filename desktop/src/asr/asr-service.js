@@ -249,6 +249,7 @@ class ASRService {
     this.retainAudioFiles = false;
     this.audioStoragePath = path.join(app.getPath('temp'), 'asr');
     ensureDir(this.audioStoragePath);
+    this.isStopping = false; // 标记是否为预期的关闭，避免误报崩溃
   }
 
   setServerCrashCallback(callback) {
@@ -364,13 +365,19 @@ class ASRService {
       logger.log(`[ASR Backend][stderr] ${data.toString().trim()}`);
     });
 
-    this.serverProcess.on('close', (code) => {
-      logger.error(`[ASR Backend] exited with code ${code}`);
+    this.serverProcess.on('close', (code, signal) => {
+      const isExpectedStop = this.isStopping || code === 0;
+      if (isExpectedStop) {
+        logger.log(`[ASR Backend] exited normally (code=${code}, signal=${signal ?? 'none'})`);
+      } else {
+        logger.error(`[ASR Backend] exited with code ${code}, signal=${signal ?? 'none'}`);
+        if (this.onServerCrash) {
+          this.onServerCrash(code);
+        }
+      }
       this.serverProcess = null;
       this.serverReady = false;
-      if (this.onServerCrash) {
-        this.onServerCrash(code);
-      }
+      this.isStopping = false;
     });
 
     this.serverProcess.on('error', (error) => {
@@ -594,6 +601,7 @@ class ASRService {
   async destroy() {
     await this.stop();
     if (this.serverProcess) {
+      this.isStopping = true;
       try {
         treeKill(this.serverProcess.pid);
       } catch {

@@ -30,5 +30,13 @@ signing.properties
 desktop/src/data
 .cursor
 desktop/.venv310
-desktop/python-env
-desktop/python-bootstrap
+# 忽略所有项目里的 python 环境目录（venv/虚拟环境/bootstrap python等）
+**/python-env
+**/python-bootstrap
+**/.venv*/
+**/venv/
+**/.venv
+# Python 缓存文件
+**/__pycache__/
+*.py[cod]
+*.pyo

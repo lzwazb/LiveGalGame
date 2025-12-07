@@ -397,17 +397,17 @@ export default function ASRManager(BaseClass) {
   // 修复 ASR 配置（迁移旧的/错误的模型名称）
   fixASRConfig() {
     try {
-      // 将 'base' 或旧的 whisper.cpp 模型名称更新为 'medium'
+      // 仅迁移旧的 whisper.cpp ggml 名称，不再强制把 base 覆盖成 medium，避免用户选择丢失
       const stmt = this.db.prepare(`
         UPDATE asr_configs
         SET model_name = 'medium', updated_at = ?
-        WHERE model_name = 'base' OR model_name LIKE 'ggml%'
+        WHERE model_name LIKE 'ggml%'
       `);
 
       const info = stmt.run(Date.now());
 
       if (info.changes > 0) {
-        console.log(`Migrated ${info.changes} ASR configs to 'medium' model`);
+        console.log(`Migrated ${info.changes} ASR configs from ggml* to 'medium' model`);
       }
     } catch (error) {
       console.error('Error fixing ASR config:', error);

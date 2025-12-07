@@ -123,6 +123,50 @@ def resolve_model_name() -> str:
     return DEFAULT_MODEL_FALLBACK
 
 
+def find_local_snapshot_path(model_name: str, cache_dir: str) -> Optional[str]:
+    """
+    在缓存目录中查找 faster-whisper 本地快照，避免重复联网校验。
+    """
+    try:
+        repo_id = model_name if "/" in model_name else f"Systran/faster-whisper-{model_name}"
+        repo_root = os.path.join(cache_dir, f"models--{repo_id.replace('/', '--')}")
+        if not os.path.isdir(repo_root):
+            return None
+
+        refs_dir = os.path.join(repo_root, "refs")
+        snapshot_sha = None
+        for ref_name in ("main", "default", "refs/head/main"):
+            ref_path = os.path.join(refs_dir, ref_name)
+            if os.path.isfile(ref_path):
+                try:
+                    sha = open(ref_path, "r", encoding="utf-8").read().strip()
+                    if sha:
+                        snapshot_sha = sha
+                        break
+                except OSError:
+                    pass
+
+        snapshots_dir = os.path.join(repo_root, "snapshots")
+        if snapshot_sha:
+            candidate = os.path.join(snapshots_dir, snapshot_sha)
+            if os.path.isdir(candidate):
+                return candidate
+
+        try:
+            snapshots = sorted(os.listdir(snapshots_dir))
+        except OSError:
+            return None
+
+        for name in reversed(snapshots):
+            candidate = os.path.join(snapshots_dir, name)
+            if os.path.isdir(candidate):
+                return candidate
+    except Exception:
+        return None
+
+    return None
+
+
 DEVICE = os.environ.get("ASR_DEVICE", "cpu")
 COMPUTE_TYPE = os.environ.get("ASR_COMPUTE_TYPE", "int8")
 LANGUAGE = os.environ.get("ASR_LANGUAGE", "zh").strip() or None
@@ -289,6 +333,22 @@ def load_model() -> WhisperModel:
             num_workers=NUM_WORKERS,
         )
         sys.stderr.write("[ASR Worker] Local model directory loaded successfully\n")
+        sys.stderr.flush()
+        return model
+
+    # 如果缓存中已有对应快照，直接加载本地快照，避免重复联网验证
+    cached_snapshot = find_local_snapshot_path(model_name, CACHE_DIR)
+    if cached_snapshot:
+        sys.stderr.write(f"[ASR Worker] Using cached snapshot: {cached_snapshot}\n")
+        sys.stderr.flush()
+        model = WhisperModel(
+            cached_snapshot,
+            device=DEVICE,
+            compute_type=COMPUTE_TYPE,
+            cpu_threads=CPU_THREADS,
+            num_workers=NUM_WORKERS,
+        )
+        sys.stderr.write("[ASR Worker] Cached snapshot loaded successfully\n")
         sys.stderr.flush()
         return model
 
@@ -501,33 +561,30 @@ def handle_streaming_chunk(
             state.clear_audio_before(LOOKBACK_SECONDS)
             state.sentence_start_sample = 0
     
-    # 6. 发送实时字幕（增量文本）
+    # 6. 发送实时字幕（增量文本）——无论是否产生了句子提交，都持续推送当前全量文本
     current_text = state.current_sentence.text if state.current_sentence.text else (
         remaining_text if complete_sentences else full_text
     )
-    
-    # 计算增量文本
-    if not sentences_to_commit:
-        # 没有提交句子，发送增量字幕
-        incremental = extract_incremental_text(
-            state.current_sentence.text if state.current_sentence.text else "",
-            current_text
-        ).strip()
-        
-        if incremental:
-            sys.stderr.write(f"[Worker] 📝 PARTIAL: \"{incremental[:30]}...\" full=\"{current_text[:30]}...\" (session={session_id})\n")
-            sys.stderr.flush()
-            send_ipc_message({
-                "request_id": request_id,
-                "session_id": session_id,
-                "type": "partial",
-                "text": incremental,
-                "full_text": current_text,
-                "timestamp": timestamp_ms,
-                "is_final": is_final,
-                "status": "success",
-                "language": info.language if hasattr(info, "language") else None,
-            })
+
+    incremental = extract_incremental_text(
+        state.current_sentence.text if state.current_sentence.text else "",
+        current_text
+    ).strip()
+
+    if incremental:
+        sys.stderr.write(f"[Worker] 📝 PARTIAL: \"{incremental[:30]}...\" full=\"{current_text[:30]}...\" (session={session_id})\n")
+        sys.stderr.flush()
+        send_ipc_message({
+            "request_id": request_id,
+            "session_id": session_id,
+            "type": "partial",
+            "text": incremental,
+            "full_text": current_text,
+            "timestamp": timestamp_ms,
+            "is_final": is_final,
+            "status": "success",
+            "language": info.language if hasattr(info, "language") else None,
+        })
     
     # 更新状态
     state.current_sentence.text = current_text

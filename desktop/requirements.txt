@@ -7,6 +7,7 @@ soundfile>=0.12.1
 numpy>=1.26.4,<2
 faster-whisper==0.10.0
 requests[socks]>=2.31.0
+httpx[socks]>=0.27.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 websockets>=12.0

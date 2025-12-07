@@ -516,6 +516,20 @@ export const useSuggestions = (sessionInfo) => {
     return () => clearTimeout(timer);
   }, [characterPendingCount, lastCharacterMessageTs, suggestionConfig, triggerPassiveSuggestion]);
 
+  // 监听配置更新广播，实时刷新建议配置
+  useEffect(() => {
+    const handler = () => {
+      // 仅在有会话时刷新，避免无效调用
+      if (sessionInfo?.conversationId) {
+        loadSuggestionConfig();
+      }
+    };
+    window.electronAPI?.on?.('suggestion-config-updated', handler);
+    return () => {
+      window.electronAPI?.removeListener?.('suggestion-config-updated', handler);
+    };
+  }, [loadSuggestionConfig, sessionInfo?.conversationId]);
+
   return {
     // 状态
     suggestions,
