@@ -37,6 +37,9 @@ const distDir = path.join(backendDir, 'dist');
 const buildDir = path.join(backendDir, 'build');
 const entryFile = path.join(backendDir, 'main.py');
 const isWin = process.platform === 'win32';
+const addDataArg = isWin
+  ? `--add-data "${path.join(backendDir, 'asr')};asr"`
+  : `--add-data "${path.join(backendDir, 'asr')}:asr"`;
 
 function run(cmd) {
   execSync(cmd, { stdio: 'inherit', cwd: projectRoot });
@@ -57,6 +60,7 @@ function main() {
     '--clean',
     '-y',
     '--name asr-backend',
+    addDataArg,
     `--distpath "${distDir}"`,
     `--workpath "${buildDir}"`,
   ];
