@@ -178,6 +178,7 @@ function installDeps() {
       'soundfile>=0.12.1',
       'numpy<2',
       'requests[socks]>=2.31.0',
+      'httpx[socks]>=0.27.0',
       'fastapi>=0.115.0',
       'uvicorn[standard]>=0.30.0',
       'websockets>=12.0',
@@ -188,22 +189,30 @@ function installDeps() {
     // Windows cmd 会把 >= 解析为重定向，逐一加引号防止误判
     const winPkgsEscaped = winPkgs.map((pkg) => `"${pkg}"`).join(' ');
     const pipLog = path.join(projectRoot, 'pip-win.log');
+    let pipErr = null;
     try {
       if (fs.existsSync(pipLog)) {
         fs.rmSync(pipLog, { force: true });
       }
-      run(`"${pythonPath}" -m pip install --no-cache-dir --log "${pipLog}" ${winPkgsEscaped}`, { env: envNoProxy });
+      const pipCmd = `"${pythonPath}" -m pip install --no-cache-dir --progress-bar off --log "${pipLog}" ${winPkgsEscaped}`;
+      run(pipCmd, { env: envNoProxy });
     } catch (err) {
+      pipErr = err;
+    } finally {
       if (fs.existsSync(pipLog)) {
         console.error('[prepare-python-env] pip log (tail)');
         try {
-          const tail = fs.readFileSync(pipLog, 'utf-8').trim().split('\n').slice(-120).join('\n');
-          console.error(tail);
+          const tail = fs.readFileSync(pipLog, 'utf-8').trim().split('\n').slice(-200).join('\n');
+          console.error(tail || '(empty log)');
         } catch (readErr) {
           console.error('[prepare-python-env] read pip log failed:', readErr.message);
         }
+      } else {
+        console.error(`[prepare-python-env] pip log not found: ${pipLog}`);
       }
-      throw err;
+      if (pipErr) {
+        throw pipErr;
+      }
     }
     return;
   }
