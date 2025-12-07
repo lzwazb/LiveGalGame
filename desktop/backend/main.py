@@ -27,6 +27,9 @@ ASR_DIR = (ASSETS_ROOT / "asr") if (ASSETS_ROOT / "asr").exists() else (PROJECT_
 DEFAULT_ENGINE = os.environ.get("ASR_ENGINE", "funasr").lower()
 DEFAULT_MODEL = os.environ.get("ASR_MODEL", "funasr-paraformer")
 
+# 支持的引擎列表
+SUPPORTED_ENGINES = {"funasr", "faster-whisper"}
+
 
 def resolve_python_cmd() -> str:
     env_py = os.environ.get("ASR_PYTHON_PATH")
@@ -58,6 +61,9 @@ class WorkerBridge:
     def _worker_path(self) -> Path:
         if self.engine == "funasr":
             return ASR_DIR / "asr_funasr_worker.py"
+        elif self.engine == "faster-whisper":
+            return ASR_DIR / "asr_faster_whisper_worker.py"
+        # Fallback to generic worker
         return ASR_DIR / "asr_worker.py"
 
     async def start(self):
