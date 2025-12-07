@@ -10,10 +10,25 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
 
-const pythonCmd =
-  process.env.PYTHON ||
-  process.env.ASR_PYTHON_PATH ||
-  (process.platform === 'win32' ? 'python' : 'python3');
+function resolvePython() {
+  // 优先显式传入的 ASR_PYTHON_PATH（CI 已指向 python-env）
+  if (process.env.ASR_PYTHON_PATH) {
+    return process.env.ASR_PYTHON_PATH;
+  }
+  if (process.env.PYTHON) {
+    return process.env.PYTHON;
+  }
+  // 尝试使用项目内的 python-env
+  const venvPy = process.platform === 'win32'
+    ? path.join(projectRoot, 'python-env', 'Scripts', 'python.exe')
+    : path.join(projectRoot, 'python-env', 'bin', 'python3');
+  if (fs.existsSync(venvPy)) {
+    return venvPy;
+  }
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
+
+const pythonCmd = resolvePython();
 
 const backendDir = path.join(projectRoot, 'backend');
 const distDir = path.join(backendDir, 'dist');

@@ -170,6 +170,26 @@ function installDeps() {
   console.log(`[prepare-python-env] upgrade pip`);
   run(`"${pythonPath}" -m pip install --upgrade pip`, { env: envNoProxy });
 
+  // Windows 路径：不安装 funasr，避免 av 编译；仅装 faster-whisper 链条
+  if (isWin) {
+    console.log('[prepare-python-env] install Windows subset (skip funasr)');
+    const winPkgs = [
+      'torch==2.2.2',
+      'torchaudio==2.2.2',
+      'faster-whisper==0.10.0',
+      'soundfile>=0.12.1',
+      'numpy<2',
+      'requests[socks]>=2.31.0',
+      'fastapi>=0.115.0',
+      'uvicorn[standard]>=0.30.0',
+      'websockets>=12.0',
+      'python-multipart>=0.0.9',
+    ];
+    run(`"${pythonPath}" -m pip install --no-cache-dir ${winPkgs.join(' ')}`, { env: envNoProxy });
+    return;
+  }
+
+  // mac / linux 按完整 requirements 安装（包含 funasr）
   console.log(`[prepare-python-env] install requirements`);
   run(`"${pythonPath}" -m pip install -r "${requirementsPath}"`, { env: envNoProxy });
 }
