@@ -92,6 +92,7 @@ jobs:
         env:
           PYTHON: ${{ matrix.python }}
           ASR_IMPL: ${{ matrix.asr }}
+          ASR_PYTHON_PATH: ${{ github.workspace }}/desktop/python-env/${{ matrix.platform == 'win' && 'Scripts/python.exe' || 'bin/python3' }}
         run: |
           if [ "${{ matrix.platform }}" = "mac" ]; then
             pnpm run build:mac -- --${{ matrix.arch }}
