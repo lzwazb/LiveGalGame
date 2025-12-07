@@ -170,11 +170,17 @@ function installDeps() {
   console.log(`[prepare-python-env] upgrade pip`);
   run(`"${pythonPath}" -m pip install --upgrade pip`, { env: envNoProxy });
 
-  // Windows 路径：不安装 funasr，避免 av 编译；仅装 faster-whisper 链条
+  // Windows 路径：不安装 funasr，避免 av/ffmpeg 源码编译；仅装 faster-whisper 链条
   if (isWin) {
     console.log('[prepare-python-env] install Windows subset (skip funasr)');
-    const winPkgs = [
-      'faster-whisper==0.10.0',
+    // 拆两步：先装依赖，再以 --no-deps 装 faster-whisper，彻底绕过 av 依赖解析
+    const deps = [
+      'ctranslate2==4.3.1',
+      'tokenizers==0.14.1',
+      'huggingface-hub==0.24.6',
+      'tqdm>=4.66.3',
+      'protobuf<5',
+      'pyyaml',
       'soundfile>=0.12.1',
       'numpy<2',
       'requests[socks]>=2.31.0',
@@ -186,23 +192,24 @@ function installDeps() {
       'pyinstaller>=6.3.0',
       'python-multipart>=0.0.9',
     ];
-    // Windows cmd 会把 >= 解析为重定向，逐一加引号防止误判
-    const winPkgsEscaped = winPkgs.map((pkg) => `"${pkg}"`).join(' ');
+    const depsEscaped = deps.map((pkg) => `"${pkg}"`).join(' ');
     const pipLog = path.join(projectRoot, 'pip-win.log');
     let pipErr = null;
     try {
       if (fs.existsSync(pipLog)) {
         fs.rmSync(pipLog, { force: true });
       }
-      const pipCmd = `"${pythonPath}" -m pip install --no-cache-dir --only-binary=:all: --progress-bar off --log "${pipLog}" ${winPkgsEscaped}`;
-      run(pipCmd, {
-        env: {
-          ...envNoProxy,
-          // 避免任何源码编译，强制使用轮子
-          PIP_ONLY_BINARY: ':all:',
-          PIP_PREFER_BINARY: '1',
-        },
-      });
+      const baseEnv = {
+        ...envNoProxy,
+        // 避免任何源码编译，强制使用轮子
+        PIP_ONLY_BINARY: ':all:',
+        PIP_PREFER_BINARY: '1',
+      };
+      const pipCmdDeps = `"${pythonPath}" -m pip install --no-cache-dir --only-binary=:all: --progress-bar off --log "${pipLog}" ${depsEscaped}`;
+      run(pipCmdDeps, { env: baseEnv });
+
+      const pipCmdFw = `"${pythonPath}" -m pip install --no-cache-dir --only-binary=:all: --no-deps --progress-bar off --log "${pipLog}" \"faster-whisper==0.10.0\"`;
+      run(pipCmdFw, { env: baseEnv });
     } catch (err) {
       pipErr = err;
     } finally {
