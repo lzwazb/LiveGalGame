@@ -2,7 +2,7 @@ import electron from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const { BrowserWindow, screen } = electron;
+const { BrowserWindow, screen, dialog } = electron;
 
 // 获取 __dirname 的 ESM 等效方式
 const __filename = fileURLToPath(import.meta.url);
@@ -15,6 +15,8 @@ export class WindowManager {
   constructor() {
     this.mainWindow = null;
     this.hudWindow = null;
+    this.hudCreating = false;       // 防止重复创建 HUD
+    this.hudCreateNotified = false; // 避免反复弹窗
     this.hudDragState = {
       isDragging: false,
       startPos: { x: 0, y: 0 },
@@ -98,6 +100,12 @@ export class WindowManager {
    * @param {Function} onHudClosed - HUD关闭回调
    */
   async createHUDWindow(checkASRReady, onHudClosed) {
+    if (this.hudCreating) {
+      return;
+    }
+    this.hudCreating = true;
+    this.hudCreateNotified = false;
+
     try {
       // 检查ASR模型是否就绪，如果未就绪则等待
       console.log('[HUD] 检查ASR模型状态...');
@@ -208,6 +216,8 @@ export class WindowManager {
     } catch (error) {
       console.error('Failed to create HUD window:', error);
     }
+    this.hudCreating = false;
+    this.hudCreateNotified = false;
   }
 
   /**

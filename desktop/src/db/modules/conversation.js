@@ -7,8 +7,10 @@ export default function ConversationManager(BaseClass) {
       VALUES (@id, @character_id, @title, @date, @affinity_change, @summary, @tags, @created_at, @updated_at)
     `);
 
-    const info = stmt.run({
-      id: conversationData.id || this.generateId(),
+    const id = conversationData.id || this.generateId();
+
+    stmt.run({
+      id,
       character_id: conversationData.character_id,
       title: conversationData.title || null,
       date: conversationData.date || Date.now(),
@@ -19,7 +21,7 @@ export default function ConversationManager(BaseClass) {
       updated_at: Date.now()
     });
 
-    return this.getConversationById(conversationData.id || info.lastInsertRowid);
+    return this.getConversationById(id);
   }
 
   // 获取角色的所有对话（带角色信息和消息数）

@@ -1,22 +1,67 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import { app } from 'electron';
 import { fileURLToPath } from 'url';
 
 // 获取 __dirname 的 ESM 等效方式
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function isDirWritable(dirPath) {
+  try {
+    fs.mkdirSync(dirPath, { recursive: true });
+    fs.accessSync(dirPath, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export default class DatabaseBase {
   constructor(options = {}) {
-    // 数据库文件路径
+    // 数据库文件路径优先级：
+    // 1) 显式传入 options.dbPath
+    // 2) 环境变量 LIVEGALGAME_DB_PATH
+    // 3) Electron userData 目录下的 livegalgame.db（可写）
+    // 4) 回落到仓库内 data 目录（开发模式）
     const customPath = options.dbPath || process.env.LIVEGALGAME_DB_PATH;
-    const resolvedPath = customPath
-      ? path.resolve(customPath)
-      : path.join(__dirname, '../../data/livegalgame.db');
+    const repoDefaultPath = path.join(__dirname, '../../data/livegalgame.db');
+    const userDataDir = app?.getPath ? app.getPath('userData') : null;
+    const userDbPath = userDataDir ? path.join(userDataDir, 'livegalgame.db') : null;
+
+    // 备选路径按照可写优先级排序
+    const candidates = [
+      customPath ? path.resolve(customPath) : null,
+      userDbPath,
+      repoDefaultPath,
+    ].filter(Boolean);
+
+    let resolvedPath = candidates.find((p) => isDirWritable(path.dirname(p)));
+    if (!resolvedPath) {
+      // 最后兜底：临时目录
+      const tmpPath = path.join(app?.getPath?.('temp') || '/tmp', 'livegalgame.db');
+      if (isDirWritable(path.dirname(tmpPath))) {
+        resolvedPath = tmpPath;
+        console.warn('[DB] All preferred locations not writable, falling back to temp DB:', resolvedPath);
+      } else {
+        throw new Error('No writable location found for database file');
+      }
+    }
+
+    // 如目标是用户目录且不存在，且仓库里有一份模板，则拷贝过去
+    try {
+      if (resolvedPath === userDbPath && !fs.existsSync(resolvedPath) && fs.existsSync(repoDefaultPath)) {
+        fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
+        fs.copyFileSync(repoDefaultPath, resolvedPath);
+      }
+    } catch (copyErr) {
+      console.error('[DB] Failed to bootstrap userData database:', copyErr);
+    }
+
     this.dbPath = resolvedPath;
 
-    // 确保data目录存在
+    // 确保数据库目录存在
     const dataDir = path.dirname(this.dbPath);
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
@@ -24,8 +69,15 @@ export default class DatabaseBase {
 
     // 创建数据库连接
     this.db = new Database(this.dbPath, {
-      verbose: console.log // 关闭 SQL 语句打印，避免每次启动都输出数据库 schema
+      verbose: console.log // 打开 SQL 语句日志，方便调试
     });
+
+    try {
+      fs.accessSync(this.dbPath, fs.constants.W_OK);
+      console.log('[DB] Using writable database at:', this.dbPath);
+    } catch {
+      console.warn('[DB] Database path may be read-only:', this.dbPath);
+    }
 
     // 启用外键约束
     this.db.pragma('foreign_keys = ON');

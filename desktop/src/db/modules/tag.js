@@ -7,13 +7,15 @@ export default function TagManager(BaseClass) {
       VALUES (@id, @name, @color)
     `);
 
-    const info = stmt.run({
-      id: tagData.id || this.generateId(),
+    const id = tagData.id || this.generateId();
+
+    stmt.run({
+      id,
       name: tagData.name,
       color: tagData.color || 'primary'
     });
 
-    return this.getTagById(tagData.id || info.lastInsertRowid);
+    return this.getTagById(id);
   }
 
   // 获取所有标签

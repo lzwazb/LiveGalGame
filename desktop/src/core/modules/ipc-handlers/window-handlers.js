@@ -1,4 +1,5 @@
 import { ipcMain } from 'electron';
+import electron from 'electron';
 
 /**
  * 注册窗口相关 IPC 处理器
@@ -9,6 +10,27 @@ import { ipcMain } from 'electron';
 export function registerWindowHandlers({ windowManager, checkASRReady }) {
   // 显示 HUD
   ipcMain.on('show-hud', async () => {
+    // 如果正在创建，弹一次提示，避免用户频繁点击
+    if (windowManager.hudCreating) {
+      if (!windowManager.hudCreateNotified) {
+        windowManager.hudCreateNotified = true;
+        const parent = windowManager.getMainWindow();
+        const message = 'ASR 模型正在加载，可能需要十几秒，请稍等片刻，无需重复点击。';
+        ipcMain.emit('log', message);
+        const dialogOpts = {
+          type: 'info',
+          buttons: ['好的'],
+          title: '正在加载',
+          message
+        };
+        if (parent) {
+          parent.webContents.send('hud-loading', { message });
+        }
+        electron.dialog.showMessageBox(parent || null, dialogOpts).catch(() => {});
+      }
+      return;
+    }
+
     if (!windowManager.getHUDWindow()) {
       await windowManager.createHUDWindow(() => checkASRReady(), () => {});
     } else {
@@ -66,4 +88,3 @@ export function registerWindowHandlers({ windowManager, checkASRReady }) {
 
   console.log('Window IPC handlers registered');
 }
-

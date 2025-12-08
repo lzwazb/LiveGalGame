@@ -21,8 +21,10 @@ export default function ASRManager(BaseClass) {
       VALUES (@id, @name, @is_active, @device_id, @device_name, @created_at, @updated_at)
     `);
 
-    const info = stmt.run({
-      id: sourceData.id || this.generateId(),
+    const id = sourceData.id || this.generateId();
+
+    stmt.run({
+      id,
       name: sourceData.name,
       is_active: sourceData.is_active !== undefined ? sourceData.is_active : 0,
       device_id: sourceData.device_id || null,
@@ -31,7 +33,7 @@ export default function ASRManager(BaseClass) {
       updated_at: Date.now()
     });
 
-    return this.getAudioSourceById(sourceData.id || info.lastInsertRowid);
+    return this.getAudioSourceById(id);
   }
 
   // 更新音频源配置
@@ -102,8 +104,10 @@ export default function ASRManager(BaseClass) {
       )
     `);
 
-    const info = stmt.run({
-      id: configData.id || this.generateId(),
+    const id = configData.id || this.generateId();
+
+    stmt.run({
+      id,
       model_name: configData.model_name || 'whisper-base',
       language: configData.language || 'zh',
       enable_vad: configData.enable_vad !== undefined ? configData.enable_vad : 1,
@@ -116,7 +120,7 @@ export default function ASRManager(BaseClass) {
       updated_at: Date.now()
     });
 
-    return this.getASRConfigById(configData.id || info.lastInsertRowid);
+    return this.getASRConfigById(id);
   }
 
   // 更新 ASR 配置

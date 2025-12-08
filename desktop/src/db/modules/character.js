@@ -7,8 +7,11 @@ export default function CharacterManager(BaseClass) {
       VALUES (@id, @name, @nickname, @relationship_label, @avatar_color, @affinity, @created_at, @updated_at, @notes)
     `);
 
-    const info = stmt.run({
-      id: characterData.id || this.generateId(),
+    // Use a consistent ID (text primary key) instead of relying on rowid
+    const id = characterData.id || this.generateId();
+
+    stmt.run({
+      id,
       name: characterData.name,
       nickname: characterData.nickname || null,
       relationship_label: characterData.relationship_label || null,
@@ -19,7 +22,7 @@ export default function CharacterManager(BaseClass) {
       notes: characterData.notes || null
     });
 
-    return this.getCharacterById(characterData.id || info.lastInsertRowid);
+    return this.getCharacterById(id);
   }
 
   // 获取所有角色
