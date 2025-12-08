@@ -17,6 +17,9 @@ function ASRSettings() {
   const [loading, setLoading] = useState(true);
   const [showAddConfig, setShowAddConfig] = useState(false);
   const [editingConfig, setEditingConfig] = useState(null);
+  const [testingASR, setTestingASR] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  const [testError, setTestError] = useState('');
 
   // ASR 模型（支持多引擎）
   const [modelPresets, setModelPresets] = useState([]);
@@ -75,6 +78,7 @@ function ASRSettings() {
               modelId: payload.modelId,
               activeDownload: true,
               bytesPerSecond: 0,
+              lastError: null, // 清除上一次错误
             },
           };
         });
@@ -110,6 +114,7 @@ function ASRSettings() {
             ...(status.modelId ? status : { ...status, modelId: payload.modelId }),
             bytesPerSecond: 0,
             activeDownload: false,
+            lastError: null,
           },
         }));
       }));
@@ -117,6 +122,9 @@ function ASRSettings() {
 
     if (api.onAsrModelDownloadError) {
       cleanups.push(api.onAsrModelDownloadError((payload) => {
+        const reason =
+          payload?.message ||
+          (payload?.code ? `进程退出码 ${payload.code}${payload?.signal ? `, 信号 ${payload.signal}` : ''}` : '未知错误');
         setModelStatuses((prev) => {
           const previous = prev[payload.modelId] || { modelId: payload.modelId };
           return {
@@ -125,9 +133,11 @@ function ASRSettings() {
               ...previous,
               modelId: payload.modelId,
               activeDownload: false,
+              lastError: reason,
             },
           };
         });
+        alert(`下载模型失败：${reason}`);
       }));
     }
 
@@ -179,6 +189,18 @@ function ASRSettings() {
   };
 
   const handleDownloadModel = async (modelId) => {
+    // 先标记前端状态，按钮/文案立刻反馈，便于“继续下载”场景
+    setModelStatuses((prev) => ({
+      ...prev,
+      [modelId]: {
+        ...(prev[modelId] || { modelId }),
+        modelId,
+        activeDownload: true,
+        lastError: null,
+        bytesPerSecond: 0,
+      },
+    }));
+
     try {
       const api = window.electronAPI;
       if (!api?.asrDownloadModel) {
@@ -187,6 +209,15 @@ function ASRSettings() {
       await api.asrDownloadModel(modelId, downloadSource);
     } catch (err) {
       console.error('下载模型失败：', err);
+      setModelStatuses((prev) => ({
+        ...prev,
+        [modelId]: {
+          ...(prev[modelId] || { modelId }),
+          modelId,
+          activeDownload: false,
+          lastError: err.message || '未知错误',
+        },
+      }));
       alert('下载模型失败：' + (err.message || '未知错误'));
     }
   };
@@ -367,7 +398,83 @@ function ASRSettings() {
 
   // 测试 ASR 功能
   const testASR = async () => {
-    alert('ASR 测试功能：系统将使用当前默认配置进行语音识别测试。\n\n请确保：\n1. 已选择正确的音频输入设备\n2. 麦克风权限已授权\n3. 环境相对安静');
+    if (testingASR) return;
+    setTestingASR(true);
+    setTestResult(null);
+    setTestError('');
+
+    let captureService = null;
+    let sentenceListener = null;
+    let testConversationId = null;
+    const cleanupListener = () => {
+      if (sentenceListener) {
+        window.electronAPI?.removeListener?.('asr-sentence-complete', sentenceListener);
+        sentenceListener = null;
+      }
+    };
+
+    try {
+      const api = window.electronAPI;
+      if (!api) throw new Error('electronAPI 不可用');
+
+      // 创建一个临时对话，便于把识别结果保存/回显
+      const conversation = await api.dbCreateConversation({
+        id: 'asr-settings-test',
+        character_id: 'asr-test-character',
+        title: 'ASR 测试',
+        date: Date.now(),
+        affinity_change: 0,
+        summary: 'ASR 设置页测试会话',
+        tags: null,
+        created_at: Date.now(),
+        updated_at: Date.now()
+      });
+      testConversationId = conversation?.id || 'asr-settings-test';
+
+      // 1) 检查模型就绪
+      const ready = await api.asrCheckReady();
+      if (!ready?.ready) {
+        throw new Error(ready?.message || 'ASR 模型未就绪，请先下载并设为默认');
+      }
+
+      // 2) 启动 ASR（使用测试会话 ID）
+      await api.asrStart(testConversationId);
+
+      // 3) 监听识别结果（拿到一句就停）
+      sentenceListener = (payload) => {
+        const finalText = payload?.text || payload?.content;
+        if (!finalText) return;
+        setTestResult(finalText);
+        if (captureService) {
+          captureService.stopCapture('speaker1').catch(() => {});
+        }
+        api.asrStop().catch(() => {});
+        setTestingASR(false);
+        cleanupListener();
+      };
+      api.on('asr-sentence-complete', sentenceListener);
+
+      // 4) 启动麦克风采集，录 6 秒
+      // audio-capture-service 默认导出的是单例实例，而非类
+      const { default: audioCaptureService } = await import('../../asr/audio-capture-service');
+      captureService = audioCaptureService;
+
+      await captureService.startMicrophoneCapture('speaker1');
+      // 超时保护：6 秒后自动停止
+      setTimeout(() => {
+        if (captureService) {
+          captureService.stopCapture('speaker1').catch(() => {});
+        }
+        api.asrStop().catch(() => {});
+        setTestingASR(false);
+        cleanupListener();
+      }, 6000);
+    } catch (err) {
+      console.error('ASR 测试失败：', err);
+      setTestError(err.message || '未知错误');
+      cleanupListener();
+      setTestingASR(false);
+    }
   };
 
   const selectedModelPreset = modelPresets.find((preset) => preset.id === formData.model_name);
@@ -600,9 +707,10 @@ function ASRSettings() {
       <div className="flex flex-wrap gap-3">
         <button
           onClick={testASR}
-          className="px-4 py-2 text-sm font-medium text-white bg-green-600 rounded-lg hover:bg-green-700 transition-colors"
+          disabled={testingASR}
+          className="px-4 py-2 text-sm font-medium text-white bg-green-600 rounded-lg hover:bg-green-700 transition-colors disabled:cursor-not-allowed disabled:bg-green-300"
         >
-          🎤 测试语音识别
+          {testingASR ? '🎤 测试中...' : '🎤 测试语音识别'}
         </button>
         <button
           onClick={loadASRConfigs}
@@ -613,6 +721,26 @@ function ASRSettings() {
       </div>
 
       {/* 说明信息 */}
+      {(testResult || testError) && (
+        <div className="mt-4 p-4 rounded-lg border text-sm">
+          {testResult && (
+            <div className="text-green-700">
+              <div className="font-semibold">测试识别结果</div>
+              <div className="mt-1 break-words">{testResult}</div>
+            </div>
+          )}
+          {testError && (
+            <div className="text-red-700">
+              <div className="font-semibold">测试失败</div>
+              <div className="mt-1">{testError}</div>
+            </div>
+          )}
+          <div className="mt-2 text-gray-600">
+            若想重新测试，请确保麦克风权限已开启并保持安静环境，再点击“测试语音识别”。
+          </div>
+        </div>
+      )}
+
       <div className="mt-8 p-4 bg-gray-50 rounded-lg">
         <h3 className="text-sm font-medium text-gray-900 mb-2">💡 使用说明</h3>
         <ul className="text-sm text-gray-600 space-y-1">

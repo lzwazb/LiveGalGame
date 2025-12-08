@@ -28,8 +28,11 @@ signing.properties
 /desktop/.temp
 /desktop/tests
 desktop/src/data
-.cursor
 desktop/.venv310
+.venv
+/desktop/memory-service/.venv
+/desktop/memory-service/__pycache__
+__pycache__/
 # 忽略所有项目里的 python 环境目录（venv/虚拟环境/bootstrap python等）
 **/python-env
 **/python-bootstrap
@@ -40,3 +43,4 @@ desktop/.venv310
 **/__pycache__/
 *.py[cod]
 *.pyo
+.cursor

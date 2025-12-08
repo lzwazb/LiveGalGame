@@ -84,6 +84,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.send('llm-start-suggestion-stream', payload);
     console.log('[Preload] llm-start-suggestion-stream sent successfully');
   },
+  // Memory Service (结构化画像/事件)
+  memoryQueryProfiles: (payload) => ipcRenderer.invoke('memory-query-profiles', payload),
+  memoryQueryEvents: (payload) => ipcRenderer.invoke('memory-query-events', payload),
   onSuggestionStreamStart: (callback) => {
     const listener = (event, data) => callback(data);
     ipcRenderer.on('llm-suggestion-stream-start', listener);
@@ -127,7 +130,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   asrGetModelPresets: () => ipcRenderer.invoke('asr-get-model-presets'),
   asrGetModelStatus: (modelId) => ipcRenderer.invoke('asr-get-model-status', modelId),
   asrGetAllModelStatuses: () => ipcRenderer.invoke('asr-get-all-model-statuses'),
-  asrDownloadModel: (modelId) => ipcRenderer.invoke('asr-download-model', modelId),
+  // 下载 ASR 模型，允许指定下载源（huggingface / modelscope）
+  asrDownloadModel: (modelId, source) => ipcRenderer.invoke('asr-download-model', modelId, source),
   asrCancelModelDownload: (modelId) => ipcRenderer.invoke('asr-cancel-model-download', modelId),
   asrGetConfigs: () => ipcRenderer.invoke('asr-get-configs'),
   asrCreateConfig: (configData) => ipcRenderer.invoke('asr-create-config', configData),
