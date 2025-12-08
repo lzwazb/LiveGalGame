@@ -113,12 +113,20 @@ function bootstrapMiniforge() {
 }
 
 function ensureCondaEnv(miniforgePython, { forceRebuild = false } = {}) {
-  const condaBin = isWin
+  let condaBin = isWin
     ? path.join(miniforgePrefix, 'Scripts', 'conda.exe')
     : path.join(miniforgePrefix, 'bin', 'conda');
 
   if (!fs.existsSync(condaBin)) {
-    throw new Error(`[prepare-python-env] conda not found at ${condaBin}, bootstrap Miniforge first`);
+    console.log(`[prepare-python-env] conda not found at ${condaBin}, bootstrapping Miniforge...`);
+    const bootstrappedPy = bootstrapMiniforge();
+    condaBin = isWin
+      ? path.join(miniforgePrefix, 'Scripts', 'conda.exe')
+      : path.join(miniforgePrefix, 'bin', 'conda');
+    if (!fs.existsSync(condaBin)) {
+      throw new Error(`[prepare-python-env] conda still not found at ${condaBin} after bootstrap`);
+    }
+    miniforgePython = bootstrappedPy;
   }
 
   if (fs.existsSync(venvDir) && forceRebuild) {
@@ -133,6 +141,9 @@ function ensureCondaEnv(miniforgePython, { forceRebuild = false } = {}) {
 
   console.log(`[prepare-python-env] creating conda env (Python ${desiredPy}) at ${venvDir}`);
   run(`"${condaBin}" create -y -p "${venvDir}" python=${desiredPy} pip`);
+
+  // 返回可能更新后的 Miniforge python 路径，便于后续步骤使用同一发行版
+  return miniforgePython;
 }
 
 function ensureVenv(pythonCmd, { forceRebuild = false } = {}) {
@@ -262,7 +273,10 @@ function main() {
   }
 
   if (isMac) {
-    ensureCondaEnv(pythonCmd, { forceRebuild });
+    const updatedPy = ensureCondaEnv(pythonCmd, { forceRebuild });
+    if (updatedPy) {
+      pythonCmd = updatedPy;
+    }
     ensureCondaPackInstalled(pythonCmd);
     installCondaPackages([
       'ffmpeg',

@@ -2,7 +2,7 @@
 --extra-index-url https://pypi.org/simple
 torch==2.2.2
 torchaudio==2.2.2
-funasr-onnx>=1.0.0
+funasr-onnx==0.4.1
 soundfile>=0.12.1
 numpy>=1.26.4,<2
 faster-whisper==0.10.0
