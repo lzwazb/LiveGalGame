@@ -242,10 +242,96 @@ export default class ASRModelManager extends EventEmitter {
     return null;
   }
 
+  /**
+   * 获取 FunASR ONNX 模型的状态
+   * 这些模型由 funasr_onnx 库自己管理下载，缓存在 ~/.cache/modelscope/hub/ 目录
+   */
+  getFunASROnnxModelStatus(modelId, preset) {
+    const onnxModels = preset.onnxModels || {};
+    const modelDirs = Object.values(onnxModels);
+
+    // funasr_onnx 使用的缓存目录
+    const funasrCacheDirs = [
+      path.join(os.homedir(), '.cache', 'modelscope', 'hub'),
+      this.msCache,
+      this.systemMsCache,
+    ];
+
+    let totalDownloadedBytes = 0;
+    let modelsFound = 0;
+    let latestUpdatedAt = null;
+    let foundPaths = [];
+
+    for (const modelDir of modelDirs) {
+      if (!modelDir) continue;
+
+      // modelDir 格式: "damo/speech_fsmn_vad_zh-cn-16k-common-onnx"
+      for (const cacheDir of funasrCacheDirs) {
+        const modelPath = path.join(cacheDir, modelDir);
+        try {
+          if (fs.existsSync(modelPath)) {
+            const size = directorySize(modelPath);
+            totalDownloadedBytes += size;
+            modelsFound++;
+            foundPaths.push(modelPath);
+
+            try {
+              const stat = fs.statSync(modelPath);
+              if (!latestUpdatedAt || stat.mtimeMs > latestUpdatedAt) {
+                latestUpdatedAt = stat.mtimeMs;
+              }
+            } catch {
+              // ignore
+            }
+            break; // Found this model, move to next
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    const totalModels = modelDirs.length;
+    const isDownloaded = modelsFound >= totalModels;
+
+    // 如果所有模型都找到了，使用第一个找到的路径作为快照路径
+    const snapshotPath = foundPaths.length > 0 ? path.dirname(foundPaths[0]) : null;
+
+    console.log(`[ASR ModelManager] FunASR ONNX Status for ${modelId}:`, {
+      modelsFound,
+      totalModels,
+      isDownloaded,
+      totalDownloadedBytes,
+      foundPaths: foundPaths.slice(0, 2), // 只打印前两个
+    });
+
+    return {
+      modelId,
+      repoId: preset.repoId,
+      modelScopeRepoId: preset.modelScopeRepoId,
+      sizeBytes: preset.sizeBytes || 0,
+      downloadedBytes: totalDownloadedBytes,
+      isDownloaded,
+      snapshotPath,
+      updatedAt: latestUpdatedAt,
+      activeDownload: this.activeDownloads.has(modelId),
+      source: 'funasr_onnx',
+      // FunASR 特有信息
+      onnxModelsFound: modelsFound,
+      onnxModelsTotal: totalModels,
+    };
+  }
+
   getModelStatus(modelId) {
     const preset = getAsrModelPreset(modelId);
     if (!preset) {
       return null;
+    }
+
+    // FunASR ONNX 模型特殊处理
+    // 这些模型由 funasr_onnx 库自己管理下载，缓存在 ~/.cache/modelscope/hub/damo/ 目录
+    if (preset.engine === 'funasr' && preset.onnxModels) {
+      return this.getFunASROnnxModelStatus(modelId, preset);
     }
 
     // Check HuggingFace cache

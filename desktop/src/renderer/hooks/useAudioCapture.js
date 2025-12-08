@@ -230,6 +230,11 @@ export const useAudioCapture = () => {
 
         const sysAudioContextOptions = { sampleRate: 48000, latencyHint: 'playback' };
         systemAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)(sysAudioContextOptions);
+        
+        // 检查 AudioContext 是否成功创建
+        if (!systemAudioContextRef.current) {
+          throw new Error('无法创建系统音频 AudioContext');
+        }
 
         attachAudioContextDebugHandlers(systemAudioContextRef.current, 'system');
 
@@ -273,10 +278,35 @@ export const useAudioCapture = () => {
           console.log(`[Settings] 系统音频流: ${audioTracks.length} 个音频轨道`);
 
           if (audioTracks.length > 0) {
+            // 检查 AudioContext 是否仍然有效
+            if (!systemAudioContextRef.current || systemAudioContextRef.current.state === 'closed') {
+              console.warn('[Settings] AudioContext 无效，重新创建...');
+              const sysAudioContextOptions = { sampleRate: 48000, latencyHint: 'playback' };
+              systemAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)(sysAudioContextOptions);
+              
+              if (!systemAudioContextRef.current) {
+                throw new Error('无法重新创建系统音频 AudioContext');
+              }
+              
+              attachAudioContextDebugHandlers(systemAudioContextRef.current, 'system');
+              
+              // 重新创建 analyser
+              const systemAnalyser = systemAudioContextRef.current.createAnalyser();
+              systemAnalyser.fftSize = 256;
+              systemAnalyser.smoothingTimeConstant = 0.8;
+              systemAnalyserRef.current = systemAnalyser;
+              systemDataArrayRef.current = new Uint8Array(systemAnalyser.frequencyBinCount);
+            }
+
             systemAudioRef.current = displayStream;
 
+            // 再次确认 AudioContext 有效后再使用
+            if (!systemAudioContextRef.current) {
+              throw new Error('系统音频 AudioContext 不可用');
+            }
+
             const systemSource = systemAudioContextRef.current.createMediaStreamSource(displayStream);
-            systemSource.connect(systemAnalyser);
+            systemSource.connect(systemAnalyserRef.current);
             sourceCount++;
 
             if (systemAudioContextRef.current.state === 'suspended') {

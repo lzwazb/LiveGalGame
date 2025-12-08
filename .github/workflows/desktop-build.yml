@@ -29,14 +29,14 @@ jobs:
             platform: mac
             arch: arm64
             python: python3.10
-            asr: funasr
+            asr: funasr-onnx
             artifact_path: |
               desktop/release/*.dmg
           - os: windows-latest
             platform: win
             arch: x64
             python: python
-            asr: faster-whisper
+            asr: funasr-onnx
             artifact_path: |
               desktop/release/*.exe
 

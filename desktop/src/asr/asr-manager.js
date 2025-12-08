@@ -117,11 +117,8 @@ class ASRManager {
 
 
       // 确定模型名称：优先使用配置中的值，默认为 'funasr-paraformer' (FunASR)
+      // Windows 也默认使用 FunASR ONNX，不再强制切换 faster-whisper
       let modelName = config.model_name || 'funasr-paraformer';
-      if (process.platform === 'win32' && modelName.startsWith('funasr')) {
-        logger.log(`Windows 检测到 FunASR，切换为 faster-whisper base`);
-        modelName = 'base';
-      }
       this.modelName = modelName;
       logger.log(`Selected ASR model: ${modelName}`);
 
@@ -563,10 +560,10 @@ class ASRManager {
         // 如果对话ID变化，更新它并清理上下文
         if (conversationId && conversationId !== this.currentConversationId) {
           logger.log(`Conversation changed from ${this.currentConversationId} to ${conversationId}, clearing context`);
-          
+
           // 【斩断所有分段】切换对话前提交所有进行中的分段
           this.commitAllSegments();
-          
+
           this.currentConversationId = conversationId;
 
           // 【自动上下文学习】切换对话时清理旧上下文
@@ -694,7 +691,8 @@ class ASRManager {
    */
   normalizeText(text) {
     if (!text) return '';
-    let normalized = text;
+    // 防御性类型转换：确保 text 是字符串
+    let normalized = typeof text === 'string' ? text : String(text);
     normalized = normalized.replace(/([\u4E00-\u9FFF])\s+(?=[\u4E00-\u9FFF])/g, '$1');
     normalized = normalized.replace(/\s+([，。！？、,.!?])/g, '$1');
     normalized = normalized.replace(/([，。！？、,.!?])\s+/g, '$1');
@@ -787,11 +785,36 @@ class ASRManager {
   /**
    * 【混合分句】处理句子完成事件（由 Python 端触发）
    * 使用 UPSERT 机制：同一分段内更新现有消息，而不是创建新消息
+   * 
+   * 新增：支持多句序列模式（sentence_index/total_sentences）
+   * 当 Python worker 识别出多个句子时，会依次发送带有 sentence_index 的消息
+   * 每个句子都应该创建独立的消息记录
+   * 
    * @param {Object} result - 句子完成结果
    */
   async handleSentenceComplete(result) {
     try {
-      const { sessionId, text, timestamp, trigger, audioDuration, isSegmentEnd } = result;
+      const {
+        sessionId,
+        text,
+        timestamp,
+        trigger,
+        audioDuration,
+        isSegmentEnd,
+        sentenceIndex,  // 新增：当前句子在序列中的索引
+        totalSentences  // 新增：总句子数量
+      } = result;
+
+      // 解析可能来自 Python 的字段名（下划线转驼峰）
+      const sentenceIdx = sentenceIndex ?? result.sentence_index ?? 0;
+      const totalSents = totalSentences ?? result.total_sentences ?? 1;
+      const isMultiSentence = totalSents > 1;
+
+      // 【多句模式】如果是多句序列的非第一句，先斩断当前分段，确保创建新消息
+      if (isMultiSentence && sentenceIdx > 0) {
+        logger.log(`[Sentence Complete] Multi-sentence mode: sentence ${sentenceIdx + 1}/${totalSents}`);
+        this.commitCurrentSegment(sessionId);
+      }
 
       // 【斩断信号】如果收到段落结束信号（如 ready_to_stop），先斩断当前分段
       if (isSegmentEnd) {

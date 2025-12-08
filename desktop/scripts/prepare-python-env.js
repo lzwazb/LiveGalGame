@@ -170,65 +170,8 @@ function installDeps() {
   console.log(`[prepare-python-env] upgrade pip`);
   run(`"${pythonPath}" -m pip install --upgrade pip`, { env: envNoProxy });
 
-  // Windows 路径：不安装 funasr，避免 av/ffmpeg 源码编译；仅装 faster-whisper 链条
-  if (isWin) {
-    console.log('[prepare-python-env] install Windows subset (skip funasr)');
-    // 拆两步：先装依赖，再以 --no-deps 装 faster-whisper，彻底绕过 av 依赖解析
-    const deps = [
-      'ctranslate2==4.3.1',
-      // tokenizers 0.14.1 依赖 huggingface_hub <0.18
-      'tokenizers==0.14.1',
-      // 某些镜像缺少 0.17.4，降级一档保持 <0.18 约束
-      'huggingface-hub==0.17.3',
-      'tqdm>=4.66.3',
-      'protobuf<5',
-      'pyyaml',
-      'soundfile>=0.12.1',
-      'numpy<2',
-      'requests[socks]>=2.31.0',
-      'httpx[socks]>=0.27.0',
-      'fastapi>=0.115.0',
-      'uvicorn[standard]>=0.30.0',
-      'websockets>=12.0',
-      // PyInstaller 用于将 backend/main.py 打成 onedir 可执行目录
-      'pyinstaller>=6.3.0',
-      'python-multipart>=0.0.9',
-    ];
-    const depsEscaped = deps.map((pkg) => `"${pkg}"`).join(' ');
-    const pipLog = path.join(projectRoot, 'pip-win.log');
-    let pipErr = null;
-    try {
-      if (fs.existsSync(pipLog)) {
-        fs.rmSync(pipLog, { force: true });
-      }
-      const pipCmdDeps = `"${pythonPath}" -m pip install --no-cache-dir --progress-bar off --log "${pipLog}" ${depsEscaped}`;
-      run(pipCmdDeps, { env: envNoProxy });
-
-      const pipCmdFw = `"${pythonPath}" -m pip install --no-cache-dir --only-binary=:all: --no-deps --progress-bar off --log "${pipLog}" \"faster-whisper==0.10.0\"`;
-      run(pipCmdFw, { env: envNoProxy });
-    } catch (err) {
-      pipErr = err;
-    } finally {
-      if (fs.existsSync(pipLog)) {
-        console.error('[prepare-python-env] pip log (tail)');
-        try {
-          const tail = fs.readFileSync(pipLog, 'utf-8').trim().split('\n').slice(-200).join('\n');
-          console.error(tail || '(empty log)');
-        } catch (readErr) {
-          console.error('[prepare-python-env] read pip log failed:', readErr.message);
-        }
-      } else {
-        console.error(`[prepare-python-env] pip log not found: ${pipLog}`);
-      }
-      if (pipErr) {
-        throw pipErr;
-      }
-    }
-    return;
-  }
-
-  // mac / linux 按完整 requirements 安装（包含 funasr）
-  console.log(`[prepare-python-env] install requirements`);
+  // 全平台统一安装 requirements（默认使用 FunASR ONNX）
+  console.log(`[prepare-python-env] install requirements (platform=${isWin ? 'win' : 'unix'})`);
   run(`"${pythonPath}" -m pip install -r "${requirementsPath}"`, { env: envNoProxy });
 }
 

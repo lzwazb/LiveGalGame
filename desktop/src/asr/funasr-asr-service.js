@@ -36,8 +36,10 @@ class FunASRService {
     }
 
     const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    // Worker 脚本在 backend/asr/ 目录下
+    const projectRoot = path.resolve(__dirname, '../..');
     this.workerScriptPath = this.resolveAsarUnpacked(
-      path.join(__dirname, 'asr_funasr_worker.py')
+      path.join(projectRoot, 'backend', 'asr', 'asr_funasr_worker.py')
     );
 
     logger.log(`[FunASR] Python path: ${this.pythonPath}`);

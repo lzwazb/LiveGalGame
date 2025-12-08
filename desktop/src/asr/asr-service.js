@@ -185,6 +185,12 @@ class FastAPISession {
             audioDuration: payload.audio_duration,
             language: payload.language,
             isSegmentEnd: payload.isSegmentEnd || payload.is_segment_end,
+            // 多句分发模式支持
+            sentenceIndex: payload.sentence_index,
+            totalSentences: payload.total_sentences,
+            rawText: payload.raw_text,
+            startTime: payload.start_time,
+            endTime: payload.end_time,
           });
         } else if (payload.type === 'partial' && this.onPartial) {
           this.onPartial({
@@ -279,8 +285,12 @@ class ASRService {
     this.audioStoragePath = options.audioStoragePath || this.audioStoragePath;
     ensureDir(this.audioStoragePath);
 
+    // 确保服务器在预加载时就启动（不要懒加载）
     if (!this.serverProcess) {
       await this.startBackendServer();
+    } else if (!this.serverReady) {
+      // 如果进程存在但还没准备好，等待健康检查
+      await this.waitForHealth();
     }
     this.serverReady = true;
     this.isInitialized = true;
@@ -325,12 +335,17 @@ class ASRService {
     this.modelCachePreDownloaded = cachedEnough;
     this.shouldReportProgress = !cachedEnough;
 
+    // Large 模型默认不使用量化，精度更高
+    const isLargeModel = this.modelName.toLowerCase().includes('large');
+    const useQuantize = this.modelPreset?.quantize !== false && !isLargeModel;
+
     const env = {
       ...process.env,
       ASR_ENGINE: this.engine,
       ASR_MODEL: this.modelName,
       ASR_HOST: this.serverHost,
       ASR_PORT: String(this.serverPort),
+      ASR_QUANTIZE: useQuantize ? 'true' : 'false',
       HF_HOME: process.env.HF_HOME || path.join(app.getPath('userData'), 'hf-home'),
       ASR_CACHE_DIR: cacheDir,
       MODELSCOPE_CACHE: process.env.MODELSCOPE_CACHE || path.join(app.getPath('userData'), 'ms-cache'),

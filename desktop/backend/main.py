@@ -22,7 +22,11 @@ BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 MEIPASS_DIR = Path(getattr(sys, "_MEIPASS", BASE_DIR))
 ASSETS_ROOT = MEIPASS_DIR if MEIPASS_DIR.exists() else PROJECT_ROOT
-ASR_DIR = (ASSETS_ROOT / "asr") if (ASSETS_ROOT / "asr").exists() else (PROJECT_ROOT / "asr")
+# Worker 脚本在 backend/asr/ 目录下
+ASR_DIR = BASE_DIR / "asr"
+if not ASR_DIR.exists():
+    # 回退到打包环境或其他位置
+    ASR_DIR = (ASSETS_ROOT / "asr") if (ASSETS_ROOT / "asr").exists() else (PROJECT_ROOT / "asr")
 
 DEFAULT_ENGINE = os.environ.get("ASR_ENGINE", "funasr").lower()
 DEFAULT_MODEL = os.environ.get("ASR_MODEL", "funasr-paraformer")
@@ -136,14 +140,20 @@ class WorkerBridge:
         print(f"[WorkerBridge] python_cmd={python_cmd}", file=sys.stderr)
         
         env = os.environ.copy()
+        
+        # 判断是否使用 Large 模型（Large 版本默认不量化）
+        is_large_model = "large" in self.model.lower()
+        
         env.update(
             {
                 "PYTHONUNBUFFERED": "1",
                 "ASR_MODEL": self.model,
                 "ASR_ENGINE": self.engine,
+                # Large 模型默认不使用量化，精度更高
+                "ASR_QUANTIZE": "false" if is_large_model else "true",
                 # align ModelScope cache with ASR cache to avoid global locks
-                "MODELSCOPE_CACHE": os.environ.get("MODELSCOPE_CACHE"),
-                "MODELSCOPE_CACHE_HOME": os.environ.get("MODELSCOPE_CACHE"),
+                "MODELSCOPE_CACHE": os.environ.get("MODELSCOPE_CACHE") or "",
+                "MODELSCOPE_CACHE_HOME": os.environ.get("MODELSCOPE_CACHE") or "",
             }
         )
 

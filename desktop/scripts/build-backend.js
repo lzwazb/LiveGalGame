@@ -68,8 +68,8 @@ function main() {
     `--workpath "${buildDir}"`,
     // 打包 asr 目录，便于运行时子进程直接调用 python 脚本（不再构建独立 worker 可执行文件）
     `--add-data "${asrDir}${dataSep}asr"`,
-    // 隐式依赖收集：确保 funasr / faster_whisper / torch 等在主包中一次性收集
-    '--collect-submodules funasr',
+    // 隐式依赖收集：确保 funasr_onnx / faster_whisper / torch 等在主包中一次性收集
+    '--collect-submodules funasr_onnx',
     '--collect-submodules faster_whisper',
     '--collect-submodules torch',
     '--collect-submodules ctranslate2',
@@ -80,7 +80,7 @@ function main() {
     '--collect-all tokenizers',
     '--collect-all sentencepiece',
     '--collect-all numpy',
-    '--hidden-import funasr',
+    '--hidden-import funasr_onnx',
     '--hidden-import faster_whisper',
     '--hidden-import torch',
   ];

@@ -1,20 +1,22 @@
 export const ASR_MODEL_PRESETS = [
-  // FunASR 模型（默认）- 使用 ModelScope 下载，国内访问更稳定
-  // FunASR 通过 name_maps_ms 将简称映射到 ModelScope 仓库：
-  //   paraformer-zh-streaming -> iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online
-  //   paraformer-zh -> iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch
-  //   ct-punc -> iic/punc_ct-transformer_cn-en-common-vocab471067-large
-  //   fa-zh -> iic/speech_timestamp_prediction-v1-16k-offline
+  // FunASR ONNX 模型（默认）- 使用 funasr_onnx 库
+  // 2-Pass 架构: VAD + 流式ASR + 离线ASR + 标点
   {
     id: 'funasr-paraformer',
     label: 'FunASR ParaFormer',
     description: 'FunASR 流式识别，专为中文优化，标点准确，速度快',
-    engine: 'funasr', // 指定使用 FunASR 引擎
-    // FunASR 内部使用简称 "paraformer-zh-streaming"，自动从 ModelScope 下载
-    repoId: 'paraformer-zh-streaming',
-    // ModelScope 实际仓库 ID
+    engine: 'funasr',
+    // ONNX 模型配置 (用于 2-Pass 架构)
+    onnxModels: {
+      vad: 'damo/speech_fsmn_vad_zh-cn-16k-common-onnx',
+      online: 'damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx',
+      offline: 'damo/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-onnx',
+      punc: 'damo/punc_ct-transformer_zh-cn-common-vocab272727-onnx',
+    },
+    // 用于缓存路径检测 (兼容 model-manager.js)
+    repoId: 'damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx',
     modelScopeRepoId: 'iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online',
-    sizeBytes: 1800 * 1024 * 1024, // 约 1.8GB（含主模型+词典等）
+    sizeBytes: 1800 * 1024 * 1024, // 约 1.8GB（含 VAD + 流式 + 离线 + 标点模型）
     recommendedSpec: '≥4 核 CPU / ≥4GB 内存',
     speedHint: '实时 2x-3x',
     language: 'zh',
@@ -25,15 +27,24 @@ export const ASR_MODEL_PRESETS = [
     label: 'FunASR ParaFormer Large',
     description: 'FunASR 大模型，更高准确率，专为中文设计',
     engine: 'funasr',
-    // FunASR 内部使用简称 "paraformer-zh"，自动从 ModelScope 下载
-    repoId: 'paraformer-zh',
-    // ModelScope 实际仓库 ID
+    // ONNX 模型配置 - 使用更大的离线模型
+    onnxModels: {
+      vad: 'damo/speech_fsmn_vad_zh-cn-16k-common-onnx',
+      online: 'damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx',
+      // Large 版本使用非量化模型，精度更高
+      offline: 'damo/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-onnx',
+      punc: 'damo/punc_ct-transformer_zh-cn-common-vocab272727-onnx',
+    },
+    quantize: false, // Large 版本不使用量化，精度更高
+    // 用于缓存路径检测 (兼容 model-manager.js)
+    repoId: 'damo/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-onnx',
     modelScopeRepoId: 'iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch',
     sizeBytes: 500 * 1024 * 1024,
     recommendedSpec: '≥8 核 CPU / ≥8GB 内存',
     speedHint: '接近实时',
     language: 'zh',
   },
+
 
   // Faster-Whisper 模型
   {

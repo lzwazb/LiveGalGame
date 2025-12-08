@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
-# FunASR Worker: streaming ASR + punctuation + hybrid segmentation
+"""
+FunASR 2-Pass Worker: 基于 funasr_onnx 的流式/离线混合语音识别
+
+参照 RealtimeMicPipeline demo 设计：
+- Pass 1 (流式): ParaformerOnline 快速出字，用于实时显示
+- Pass 2 (离线): ParaformerOffline + 标点模型，用于最终修正
+
+分句策略：
+- VAD 检测语音边界
+- 静音累积达到阈值触发 Pass 2 修正
+- 支持强制提交 (force_commit)
+"""
 
 import json
 import os
 import sys
 import time
 import traceback
+import base64
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
-from funasr import AutoModel
-
-from asr_utils import decode_audio_chunk, extract_incremental_text, split_by_sentence_end
-from funasr_helpers import funasr_streaming_recognition, load_funasr_models
-from funasr_text_utils import apply_incremental_punctuation, apply_punctuation
 
 # ==============================================================================
 # OS 级别的文件描述符重定向
@@ -39,468 +46,524 @@ def send_ipc_message(data):
 # ==============================================================================
 # 环境变量配置
 # ==============================================================================
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ.setdefault("TQDM_DISABLE", "1")
 
-HF_HOME = os.environ.get("HF_HOME")
-DEFAULT_CACHE_DIR = os.path.join(HF_HOME, "hub") if HF_HOME else os.path.expanduser("~/.cache/huggingface/hub")
-CACHE_DIR = os.environ.get("ASR_CACHE_DIR") or DEFAULT_CACHE_DIR
-os.makedirs(CACHE_DIR, exist_ok=True)
+MODELSCOPE_CACHE = os.environ.get("MODELSCOPE_CACHE") or os.environ.get("ASR_CACHE_DIR")
+if MODELSCOPE_CACHE:
+    os.environ.setdefault("MODELSCOPE_CACHE", MODELSCOPE_CACHE)
+    os.environ.setdefault("MODELSCOPE_CACHE_HOME", MODELSCOPE_CACHE)
 
 # ==============================================================================
 # FunASR 配置
 # ==============================================================================
 SAMPLE_RATE = int(os.environ.get("ASR_SAMPLE_RATE", "16000"))
+CHUNK_MS = int(os.environ.get("ASR_CHUNK_MS", "200"))  # 每次读取的音频块时长 (毫秒)
+CHUNK_SAMPLES = int(SAMPLE_RATE * CHUNK_MS / 1000)
 
-# 滑动窗口配置
-CHUNK_SIZE = os.environ.get("FUNASR_CHUNK_SIZE", "0,10,5")  # ctx,left,right
-CHUNK_SIZE_LIST = [int(x) for x in CHUNK_SIZE.split(",")]
-ENCODER_LOOK_BACK = int(os.environ.get("FUNASR_ENCODER_LOOK_BACK", "4"))
-DECODER_LOOK_BACK = int(os.environ.get("FUNASR_DECODER_LOOK_BACK", "1"))
-
-# 识别窗口配置
-MIN_NEW_AUDIO_SECONDS = float(os.environ.get("ASR_MIN_NEW_AUDIO", "0.5"))
-MAX_BUFFER_SECONDS = float(os.environ.get("ASR_BUFFER_SECONDS", "30"))
-LOOKBACK_SECONDS = float(os.environ.get("ASR_LOOKBACK_SECONDS", "1.0"))
-MIN_DECODE_SAMPLES = int(0.4 * 16000)  # 最小解码采样数
-
-MIN_NEW_AUDIO_SAMPLES = int(MIN_NEW_AUDIO_SECONDS * SAMPLE_RATE)
-MAX_BUFFER_SAMPLES = int(MAX_BUFFER_SECONDS * SAMPLE_RATE)
+# 静音检测配置
+SILENCE_THRESHOLD_CHUNKS = int(os.environ.get("ASR_SILENCE_CHUNKS", "3"))  # 连续静音块数触发句尾
+SILENCE_BUFFER_KEEP = 2  # 保留多少个静音块让音频更自然
 
 # 分句配置
 SENTENCE_END_PUNCTUATION = set("。！？!?.；;")
-MIN_SENTENCE_CHARS = int(os.environ.get("MIN_SENTENCE_CHARS", "4"))
-# 【优化】提高自动提交门槛，减少句子截断
-MIN_AUTO_COMMIT_CHARS = int(os.environ.get("MIN_AUTO_COMMIT_CHARS", "30"))  # 从18提高到30
-MAX_SENTENCE_SECONDS = float(os.environ.get("MAX_SENTENCE_SECONDS", "20"))  # 从15提高到20
-# 【优化】提高停顿检测阈值，减少误判
-SEGMENT_GAP_THRESHOLD = float(os.environ.get("SEGMENT_GAP_THRESHOLD", "1.2"))  # 从0.5提高到1.2
-
-# 【优化】标点添加策略配置 - 降低延迟，提升响应速度
-PUNC_DEBOUNCE_INTERVAL = float(os.environ.get("PUNC_DEBOUNCE_INTERVAL", "0.3"))  # 从0.8降至0.3秒
-MIN_CHARS_FOR_PUNC = int(os.environ.get("MIN_CHARS_FOR_PUNC", "3"))  # 从6降至3个字符
-PUNC_CONTEXT_SENTENCES = int(os.environ.get("PUNC_CONTEXT_SENTENCES", "2"))  # 保留多少个已完成句子作为上下文
+MIN_SENTENCE_CHARS = int(os.environ.get("MIN_SENTENCE_CHARS", "2"))
 
 
-@dataclass
-class SentenceBuffer:
-    """当前正在构建的句子"""
-    text: str = ""
-    start_time: float = 0.0
-    last_update_time: float = 0.0
+def decode_audio_chunk(audio_b64: str) -> np.ndarray:
+    """Base64 音频转 float32 numpy array（范围 -1~1）。"""
+    audio_bytes = base64.b64decode(audio_b64)
+    audio_int16 = np.frombuffer(audio_bytes, dtype=np.int16)
+    return audio_int16.astype(np.float32)  # funasr_onnx 接受 float32，不除以 32768
 
 
-# 【核心修复】FunASR 流式模型需要固定大小的 chunk
-# chunk_size = [0, 10, 5] 意味着 stride = 10 * 60ms = 600ms = 9600 samples
-FUNASR_STRIDE_SAMPLES = int(CHUNK_SIZE_LIST[1] * 0.06 * SAMPLE_RATE)
+def smart_split_sentences(text: str) -> List[str]:
+    """
+    智能分句：基于标点符号将长文本切分成自然的句子。
+    
+    策略：
+    1. 优先按句末标点（。！？!?.）分割
+    2. 如果分隔后的句子太短，考虑合并
+    3. 如果没有句末标点，返回原文
+    """
+    if not text or len(text) < MIN_SENTENCE_CHARS:
+        return [text] if text else []
+    
+    # 定义句末标点
+    sentence_endings = "。！？!?."
+    
+    sentences = []
+    current_sentence = ""
+    
+    for char in text:
+        current_sentence += char
+        if char in sentence_endings:
+            trimmed = current_sentence.strip()
+            if trimmed and len(trimmed) >= MIN_SENTENCE_CHARS:
+                sentences.append(trimmed)
+            elif trimmed and sentences:
+                # 太短的句子合并到上一句
+                sentences[-1] += trimmed
+            elif trimmed:
+                sentences.append(trimmed)
+            current_sentence = ""
+    
+    # 处理剩余的文本
+    remaining = current_sentence.strip()
+    if remaining:
+        if len(remaining) < MIN_SENTENCE_CHARS and sentences:
+            # 太短就合并到上一句
+            sentences[-1] += remaining
+        else:
+            sentences.append(remaining)
+    
+    return sentences if sentences else [text]
+
 
 
 @dataclass
 class SessionState:
     """
-    FunASR 会话状态，管理音频缓冲和分句
-
-    【核心修复】添加音频累积器，确保按固定大小送入模型
+    FunASR 2-Pass 会话状态
     """
-    # 【新增】音频累积缓冲区
-    audio_buffer: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float32))
-    processed_samples: int = 0
-    current_sentence: SentenceBuffer = field(default_factory=SentenceBuffer)
-    last_partial_text: str = ""
-    funasr_cache: Dict = field(default_factory=dict)
-    completed_sentences: List[str] = field(default_factory=list)
-    # 【优化】增量标点化状态
-    last_punc_time: float = 0.0
-    raw_text_buffer: str = ""  # 原始未加标点的文本缓冲
-    stable_punctuated_text: str = ""  # 已稳定的标点化文本（最后一个句末标点之前）
-    unstable_raw_text: str = ""  # 不稳定的原始文本（最后一个句末标点之后）
-
-    def append_audio(self, samples: np.ndarray):
-        """累积音频数据"""
-        if self.audio_buffer.size == 0:
-            self.audio_buffer = samples.astype(np.float32)
-        else:
-            self.audio_buffer = np.concatenate([self.audio_buffer, samples.astype(np.float32)])
-
-    def get_next_chunk(self) -> Tuple[np.ndarray, bool]:
-        """
-        获取下一个固定大小的 chunk
-        返回: (chunk, has_more)
-        """
-        if self.audio_buffer.size >= FUNASR_STRIDE_SAMPLES:
-            chunk = self.audio_buffer[:FUNASR_STRIDE_SAMPLES]
-            self.audio_buffer = self.audio_buffer[FUNASR_STRIDE_SAMPLES:]
-            return chunk, self.audio_buffer.size >= FUNASR_STRIDE_SAMPLES
-        return None, False
-
-    def get_remaining_audio(self) -> np.ndarray:
-        """获取剩余的音频（用于 is_final）"""
-        remaining = self.audio_buffer
-        self.audio_buffer = np.array([], dtype=np.float32)
-        return remaining
-
-    def update_processed_samples(self, samples: int):
-        """记录已处理的采样点数量"""
-        self.processed_samples += samples
-
+    # 音频缓冲区 (给 Pass 2 用)
+    full_sentence_buffer: List[np.ndarray] = field(default_factory=list)
+    
+    # Pass 1 流式模型的上下文缓存
+    online_cache: Dict = field(default_factory=dict)
+    
+    # 静音检测
+    silence_counter: int = 0
+    is_speaking: bool = False
+    
+    # 累积的流式文本
+    streaming_text: str = ""
+    last_sent_text: str = ""
+    
+    # 时间戳
+    start_time: float = 0.0
+    
     def reset(self):
-        """完全重置会话状态"""
-        self.audio_buffer = np.array([], dtype=np.float32)
-        self.processed_samples = 0
-        self.current_sentence = SentenceBuffer()
-        self.last_partial_text = ""
-        self.completed_sentences.clear()
-        self.funasr_cache = {}
-        self.last_punc_time = 0.0
-        self.raw_text_buffer = ""
-        self.stable_punctuated_text = ""
-        self.unstable_raw_text = ""
+        """重置会话状态"""
+        self.full_sentence_buffer.clear()
+        self.online_cache.clear()
+        self.silence_counter = 0
+        self.is_speaking = False
+        self.streaming_text = ""
+        self.last_sent_text = ""
+        self.start_time = 0.0
 
 
-def extract_incremental_text(previous: str, current: str) -> str:
-    """提取增量文本"""
-    if not current:
-        return ""
-    if not previous:
-        return current
-    if current == previous or current in previous:
-        return ""
-    if previous in current:
-        return current[len(previous):]
-
-    # 尝试找到最长的重叠部分
-    max_overlap = min(len(previous), len(current))
-    for overlap in range(max_overlap, 0, -1):
-        if previous[-overlap:] == current[:overlap]:
-            return current[overlap:]
-    return current
-
-
-def process_single_chunk(
-    stream_model: AutoModel,
-    punc_model: AutoModel,
-    chunk: np.ndarray,
-    state: SessionState,
-    request_id: str,
-    session_id: str,
-    is_final: bool,
-) -> str:
+def load_funasr_onnx_models():
     """
-    处理单个固定大小的 chunk
-    返回：识别文本（RAW，无标点）
+    加载 funasr_onnx 模型 (VAD + 流式ASR + 离线ASR + 标点)
+    
+    支持的环境变量:
+    - ASR_MODEL: 模型 ID (funasr-paraformer / funasr-paraformer-large)
+    - ASR_QUANTIZE: 是否使用量化 (true/false)，默认根据模型类型自动选择
     """
     try:
-        raw_text = funasr_streaming_recognition(
-            chunk,
-            stream_model,
-            state.funasr_cache,
-            CHUNK_SIZE_LIST,
-            ENCODER_LOOK_BACK,
-            DECODER_LOOK_BACK,
-            is_final=is_final,
-        )
-        return raw_text
-    except Exception as exc:
-        sys.stderr.write(f"[FunASR Worker] Chunk recognition failed: {exc}\n")
+        from funasr_onnx.vad_bin import Fsmn_vad
+        from funasr_onnx.paraformer_online_bin import Paraformer as ParaformerOnline
+        from funasr_onnx.paraformer_bin import Paraformer as ParaformerOffline
+        from funasr_onnx.punc_bin import CT_Transformer
+    except ImportError as e:
+        sys.stderr.write(f"[FunASR Worker] Import error: {e}\n")
+        sys.stderr.write("[FunASR Worker] Please install: pip install funasr_onnx\n")
         sys.stderr.flush()
-        return ""
+        raise
+
+    # 读取模型配置
+    model_id = os.environ.get("ASR_MODEL", "funasr-paraformer")
+    is_large = "large" in model_id.lower()
+    
+    # Large 版本默认不使用量化，精度更高
+    quantize_env = os.environ.get("ASR_QUANTIZE", "").lower()
+    if quantize_env in ("true", "1", "yes"):
+        use_quantize = True
+    elif quantize_env in ("false", "0", "no"):
+        use_quantize = False
+    else:
+        # 默认: 普通版量化，Large版不量化
+        use_quantize = not is_large
+    
+    sys.stderr.write(f"[FunASR Worker] Model ID: {model_id}\n")
+    sys.stderr.write(f"[FunASR Worker] Is Large model: {is_large}\n")
+    sys.stderr.write(f"[FunASR Worker] Use Quantize: {use_quantize}\n")
+    sys.stderr.write("[FunASR Worker] Loading ONNX models (first run will download)...\n")
+    sys.stderr.flush()
+
+    # ONNX 模型配置
+    # 可以通过环境变量覆盖默认模型
+    vad_model_dir = os.environ.get(
+        "FUNASR_VAD_MODEL", 
+        "damo/speech_fsmn_vad_zh-cn-16k-common-onnx"
+    )
+    online_model_dir = os.environ.get(
+        "FUNASR_ONLINE_MODEL",
+        "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx"
+    )
+    offline_model_dir = os.environ.get(
+        "FUNASR_OFFLINE_MODEL",
+        "damo/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-onnx"
+    )
+    punc_model_dir = os.environ.get(
+        "FUNASR_PUNC_MODEL",
+        "damo/punc_ct-transformer_zh-cn-common-vocab272727-onnx"
+    )
+
+    # 1. VAD 模型: 检测语音活动
+    sys.stderr.write(f"[FunASR Worker] Loading VAD model: {vad_model_dir}...\n")
+    sys.stderr.flush()
+    vad_model = Fsmn_vad(
+        model_dir=vad_model_dir,
+        quantize=use_quantize
+    )
+
+    # 2. Pass 1 流式模型: 快速出字
+    sys.stderr.write(f"[FunASR Worker] Loading streaming ASR model (Pass 1): {online_model_dir}...\n")
+    sys.stderr.flush()
+    asr_online_model = ParaformerOnline(
+        model_dir=online_model_dir,
+        batch_size=1,
+        quantize=use_quantize,
+        intra_op_num_threads=4
+    )
+
+    # 3. Pass 2 非流式模型: 高精度识别
+    sys.stderr.write(f"[FunASR Worker] Loading offline ASR model (Pass 2): {offline_model_dir}...\n")
+    sys.stderr.flush()
+    asr_offline_model = ParaformerOffline(
+        model_dir=offline_model_dir,
+        batch_size=1,
+        quantize=use_quantize,
+        intra_op_num_threads=4
+    )
+
+    # 4. 标点模型: 给 Pass 2 结果加标点
+    sys.stderr.write(f"[FunASR Worker] Loading punctuation model: {punc_model_dir}...\n")
+    sys.stderr.flush()
+    punc_model = CT_Transformer(
+        model_dir=punc_model_dir,
+        quantize=use_quantize,
+        intra_op_num_threads=2
+    )
+
+    sys.stderr.write("[FunASR Worker] All models loaded successfully!\n")
+    sys.stderr.write(f"[FunASR Worker] Configuration: model={model_id}, quantize={use_quantize}\n")
+    sys.stderr.flush()
+
+    return vad_model, asr_online_model, asr_offline_model, punc_model
 
 
 def handle_streaming_chunk(
-    stream_model: AutoModel,
-    punc_model: AutoModel,
-    data: Dict,
+    vad_model,
+    asr_online_model,
+    asr_offline_model,
+    punc_model,
+    data: dict,
     sessions_cache: Dict[str, SessionState],
 ):
     """
-    【核心修复】按照固定 stride 大小处理流式音频
+    处理流式音频块 - 2-Pass 架构
     
-    关键改进：
-    1. 累积音频数据到缓冲区
-    2. 按照 FUNASR_STRIDE_SAMPLES (9600 samples = 600ms) 切分
-    3. 每个 chunk 依次送入模型，维护 cache 连续性
+    Pass 1: 实时流式识别，快速返回 partial 结果
+    Pass 2: 检测到句尾后，使用离线模型 + 标点进行高精度修正
     """
     request_id = data.get("request_id", "default")
     session_id = data.get("session_id", request_id)
     audio_data_b64 = data.get("audio_data")
     is_final = bool(data.get("is_final", False))
+    timestamp_ms = data.get("timestamp", int(time.time() * 1000))
 
     if not audio_data_b64:
         send_ipc_message({"request_id": request_id, "error": "No audio_data provided"})
         return
 
     state = sessions_cache.setdefault(session_id, SessionState())
-    samples = decode_audio_chunk(audio_data_b64)
-    if samples.size == 0:
+    audio_chunk = decode_audio_chunk(audio_data_b64)
+
+    if audio_chunk.size == 0:
         return
 
-    # 【核心】累积音频到缓冲区
-    state.append_audio(samples)
+    # 记录开始时间
+    if not state.is_speaking and state.start_time == 0:
+        state.start_time = time.time()
+
+    # ==== VAD 检测 ====
+    try:
+        vad_segments = vad_model(audio_chunk)
+        current_chunk_has_speech = len(vad_segments) > 0
+    except Exception as e:
+        sys.stderr.write(f"[FunASR Worker] VAD error: {e}\n")
+        sys.stderr.flush()
+        current_chunk_has_speech = True  # 出错时保守处理
+
+    # ==== 状态管理 ====
+    if current_chunk_has_speech:
+        state.silence_counter = 0
+        state.is_speaking = True
+        state.full_sentence_buffer.append(audio_chunk)
+    else:
+        if state.is_speaking:
+            state.silence_counter += 1
+            # 保留一点静音段让音频更自然
+            if state.silence_counter < SILENCE_BUFFER_KEEP:
+                state.full_sentence_buffer.append(audio_chunk)
+
+    # ==== Pass 1: 实时流式识别 ====
+    if state.is_speaking:
+        try:
+            partial_res = asr_online_model(
+                audio_chunk,
+                param_dict={"cache": state.online_cache, "is_final": False},
+            )
+
+            if partial_res:
+                # 调试日志：查看实际返回的格式
+                sys.stderr.write(f"[FunASR Worker] DEBUG partial_res type={type(partial_res).__name__}, value={str(partial_res)[:100]}\n")
+                sys.stderr.flush()
+                
+                # funasr_onnx 返回格式可能是:
+                # 1. [('text', ['chars'])] - 列表包含 tuple
+                # 2. [{'preds': 'text'}] - 列表包含字典
+                # 3. ('text', ['chars']) - 直接是 tuple
+                text = ""
+                
+                # 先解包列表
+                item = partial_res
+                while isinstance(item, list) and len(item) > 0:
+                    item = item[0]
+                
+                # 现在 item 应该是 tuple 或 dict 或 str
+                if isinstance(item, dict):
+                    preds_value = item.get("preds") or item.get("text") or ""
+                    # 如果 preds 是 tuple，需要提取字符串
+                    if isinstance(preds_value, tuple) and len(preds_value) > 0:
+                        text = preds_value[0] if isinstance(preds_value[0], str) else str(preds_value[0])
+                    elif isinstance(preds_value, str):
+                        text = preds_value
+                    else:
+                        text = str(preds_value) if preds_value else ""
+                elif isinstance(item, tuple) and len(item) > 0:
+                    # Tuple 格式: ('text', ['chars']) - 取第一个元素
+                    first_elem = item[0]
+                    text = first_elem if isinstance(first_elem, str) else str(first_elem)
+                elif isinstance(item, str):
+                    text = item
+                else:
+                    text = str(item) if item else ""
+                
+                sys.stderr.write(f"[FunASR Worker] DEBUG extracted text=\"{text[:50]}...\"\n")
+                sys.stderr.flush()
+                
+                if text and text != state.last_sent_text:
+                    state.streaming_text = text
+                    send_ipc_message({
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "type": "partial",
+                        "text": text,
+                        "full_text": text,
+                        "timestamp": timestamp_ms,
+                        "is_final": False,
+                        "status": "success",
+                        "language": "zh",
+                    })
+                    state.last_sent_text = text
+                    sys.stderr.write(f"[FunASR Worker] 📝 PARTIAL: \"{text[:50]}...\"\n")
+                    sys.stderr.flush()
+        except Exception as e:
+            sys.stderr.write(f"[FunASR Worker] Pass 1 error: {e}\n")
+            sys.stderr.flush()
+
+    # ==== Pass 2: 检测到句尾，触发高精度修正 ====
+    if state.is_speaking and state.silence_counter >= SILENCE_THRESHOLD_CHUNKS:
+        _trigger_pass2(
+            asr_offline_model,
+            punc_model,
+            state,
+            request_id,
+            session_id,
+            timestamp_ms,
+            trigger="silence",
+        )
+
+    # ==== 处理 is_final 标记 ====
+    if is_final and state.full_sentence_buffer:
+        _trigger_pass2(
+            asr_offline_model,
+            punc_model,
+            state,
+            request_id,
+            session_id,
+            timestamp_ms,
+            trigger="final",
+        )
+
+
+def _trigger_pass2(
+    asr_offline_model,
+    punc_model,
+    state: SessionState,
+    request_id: str,
+    session_id: str,
+    timestamp_ms: int,
+    trigger: str,
+):
+    """
+    触发 Pass 2: 离线高精度识别 + 标点 + 智能分句
     
-    timestamp_ms = int(time.time() * 1000)
-    sys.stderr.write(
-        f"[FunASR Worker] Audio received: session={session_id}, new_samples={len(samples)}, "
-        f"buffer_size={state.audio_buffer.size}, stride={FUNASR_STRIDE_SAMPLES}\n"
-    )
+    改进：使用标点模型结果进行智能分句，将长文本拆分成多个自然句子分别发送。
+    """
+    if not state.full_sentence_buffer:
+        return
+
+    sys.stderr.write(f"[FunASR Worker] Triggering Pass 2 ({trigger})...\n")
     sys.stderr.flush()
 
-    # 【核心】按固定大小切分并依次处理
-    accumulated_text = ""
-    chunks_processed = 0
-    
-    while True:
-        chunk, has_more = state.get_next_chunk()
-        if chunk is None:
-            break
-        
-        chunks_processed += 1
-        chunk_text = process_single_chunk(
-            stream_model, punc_model, chunk, state,
-            request_id, session_id, is_final=False
-        )
-        if chunk_text:
-            accumulated_text += chunk_text
-            sys.stderr.write(f"[FunASR Worker] Chunk #{chunks_processed} text: \"{chunk_text[:30]}...\"\n")
-            sys.stderr.flush()
-        
-        state.update_processed_samples(len(chunk))
+    try:
+        # 合并音频片段
+        complete_audio = np.concatenate(state.full_sentence_buffer)
+        audio_duration = len(complete_audio) / SAMPLE_RATE
 
-    # 如果是最终块，处理剩余音频
-    if is_final:
-        remaining = state.get_remaining_audio()
-        if remaining.size > 0:
-            chunks_processed += 1
-            final_text = process_single_chunk(
-                stream_model, punc_model, remaining, state,
-                request_id, session_id, is_final=True
-            )
-            if final_text:
-                accumulated_text += final_text
-                sys.stderr.write(f"[FunASR Worker] Final chunk text: \"{final_text[:30]}...\"\n")
+        # A. 非流式高精度识别
+        offline_res = asr_offline_model(complete_audio)
+        raw_text = ""
+        if offline_res:
+            # 解析返回值（可能是 tuple 或 dict）
+            item = offline_res[0] if isinstance(offline_res, list) else offline_res
+            if isinstance(item, dict):
+                raw_text = item.get("preds") or item.get("text") or ""
+            elif isinstance(item, (tuple, list)) and len(item) > 0:
+                raw_text = item[0] if isinstance(item[0], str) else str(item[0])
+            elif isinstance(item, str):
+                raw_text = item
+            else:
+                raw_text = str(item) if item else ""
+
+        if raw_text and len(raw_text) >= MIN_SENTENCE_CHARS:
+            # B. 标点预测
+            try:
+                punc_res = punc_model(raw_text)
+                # 解析标点模型返回值
+                if punc_res:
+                    punc_item = punc_res[0] if isinstance(punc_res, list) else punc_res
+                    if isinstance(punc_item, str):
+                        punctuated_text = punc_item
+                    elif isinstance(punc_item, (tuple, list)) and len(punc_item) > 0:
+                        punctuated_text = punc_item[0] if isinstance(punc_item[0], str) else str(punc_item[0])
+                    else:
+                        punctuated_text = str(punc_item) if punc_item else raw_text
+                else:
+                    punctuated_text = raw_text
+            except Exception as e:
+                sys.stderr.write(f"[FunASR Worker] Punctuation error: {e}\n")
                 sys.stderr.flush()
-            state.update_processed_samples(len(remaining))
+                punctuated_text = raw_text
 
-    if chunks_processed > 0:
-        sys.stderr.write(
-            f"[FunASR Worker] Processed {chunks_processed} chunks, "
-            f"accumulated_text=\"{accumulated_text[:50]}...\"\n"
-        )
-        sys.stderr.flush()
-
-    if not accumulated_text:
-        return
-
-    # =========================================================================
-    # 分句处理逻辑
-    # =========================================================================
-    chunk_start_time_ms = (state.processed_samples - len(samples)) / SAMPLE_RATE * 1000
-    chunk_end_time_ms = state.processed_samples / SAMPLE_RATE * 1000
-    audio_duration = len(samples) / SAMPLE_RATE
-
-    # 更新原始文本缓冲区（无标点）
-    state.raw_text_buffer += accumulated_text
-    # 【关键修复】同步更新不稳定区域的原始文本
-    state.unstable_raw_text += accumulated_text
-    
-    sentence_start_time_sec = state.current_sentence.start_time
-    if not sentence_start_time_sec:
-        sentence_start_time_sec = chunk_start_time_ms / 1000
-        state.current_sentence.start_time = sentence_start_time_sec
-
-    # 【优化1】立即更新显示文本（原始文本），不等待标点化
-    # 让UI能够实时显示任何识别到的内容
-    state.current_sentence.text = f"{state.stable_punctuated_text}{state.unstable_raw_text}"
-
-    # 【优化3】异步标点化 - 检查是否需要添加标点（防抖）
-    current_time = time.time()
-    should_punctuate = (
-        len(state.unstable_raw_text) >= MIN_CHARS_FOR_PUNC and
-        (current_time - state.last_punc_time) >= PUNC_DEBOUNCE_INTERVAL
-    )
-    
-    # 4. 如果满足条件，只对不稳定区域（新文本）添加标点
-    if should_punctuate:
-        # 使用增量标点化，保留上下文
-        new_punctuated = apply_incremental_punctuation(
-            state.stable_punctuated_text,
-            state.unstable_raw_text,
-            punc_model,
-            SENTENCE_END_PUNCTUATION,
-            context_sentences=PUNC_CONTEXT_SENTENCES
-        )
-        
-        # 更新当前显示文本
-        state.current_sentence.text = f"{state.stable_punctuated_text}{new_punctuated}"
-        state.last_punc_time = current_time
-        
-        sys.stderr.write(
-            f"[FunASR Worker] 🔤 Incremental punctuation: "
-            f"stable={len(state.stable_punctuated_text)} chars, "
-            f"new_raw={len(state.unstable_raw_text)} chars, "
-            f"new_punc={len(new_punctuated)} chars\n"
-        )
-        sys.stderr.flush()
-
-    # 3. 对齐 Faster-Whisper 的 partial 输出：只发送一次、包含历史文本
-    display_text = state.current_sentence.text.strip()
-    full_text_parts = state.completed_sentences.copy()
-    if display_text:
-        full_text_parts.append(display_text)
-    full_text = " ".join(full_text_parts).strip()
-    incremental_display = extract_incremental_text(state.last_partial_text, full_text).strip()
-    if incremental_display or is_final:
-        send_ipc_message({
-            "request_id": request_id,
-            "session_id": session_id,
-            "type": "partial",
-            "text": incremental_display,
-            "full_text": full_text,
-            "timestamp": timestamp_ms,
-            "is_final": is_final,
-            "status": "success",
-            "language": "zh",
-        })
-        sys.stderr.write(f"[FunASR Worker] 📝 PARTIAL: \"{incremental_display[:50]}...\"\n")
-        sys.stderr.flush()
-        state.last_partial_text = full_text
-    
-    # 4. 对当前文本进行分句检查
-    text_for_split = state.current_sentence.text
-    
-    # 如果文本还未标点化，临时标点化用于分句判断
-    if not should_punctuate and len(state.unstable_raw_text) >= MIN_CHARS_FOR_PUNC:
-        temp_punctuated = apply_incremental_punctuation(
-            state.stable_punctuated_text,
-            state.unstable_raw_text,
-            punc_model,
-            SENTENCE_END_PUNCTUATION,
-            context_sentences=PUNC_CONTEXT_SENTENCES
-        )
-        text_for_split = f"{state.stable_punctuated_text}{temp_punctuated}"
-    
-    # 4. 分句：从标点化的文本中提取完整句子
-    complete_sentences, remaining_text = split_by_sentence_end(
-        text_for_split,
-        MIN_SENTENCE_CHARS,
-        SENTENCE_END_PUNCTUATION,
-    )
-    sentences_to_commit = [s for s in complete_sentences if len(s.strip()) >= MIN_SENTENCE_CHARS]
-
-    # 超过最大句子时长或结束块时强制提交
-    sentence_duration = 0.0
-    if sentence_start_time_sec:
-        sentence_duration = (chunk_end_time_ms / 1000) - sentence_start_time_sec
-    should_force_commit = sentence_duration >= MAX_SENTENCE_SECONDS or is_final
-
-    deferred_text = ""
-    commit_ready = []
-    for sentence in sentences_to_commit:
-        sentence_text = sentence.strip()
-        if not sentence_text:
-            continue
-        if (
-            len(sentence_text) < MIN_AUTO_COMMIT_CHARS
-            and not should_force_commit
-            and not is_final
-        ):
-            deferred_text += sentence_text
-            continue
-        commit_ready.append(sentence_text)
-
-    # 5. 提交完整句子
-    if commit_ready:
-        commit_start_time_sec = sentence_start_time_sec or (chunk_start_time_ms / 1000)
-        for sentence_text in commit_ready:
-            # 【优化】对最终提交的句子重新标点化，确保准确性
-            final_sentence = apply_punctuation(sentence_text, punc_model)
-            
-            start_ms = int(commit_start_time_sec * 1000)
-            send_ipc_message({
-                "request_id": request_id,
-                "session_id": session_id,
-                "type": "sentence_complete",
-                "text": final_sentence,
-                "timestamp": timestamp_ms,
-                "is_final": is_final,
-                "status": "success",
-                "language": "zh",
-                "audio_duration": audio_duration,
-                "start_time": start_ms,
-                "end_time": int(chunk_end_time_ms),
-            })
-            sys.stderr.write(f"[FunASR Worker] 🎯 SENTENCE_COMPLETE: \"{final_sentence[:50]}...\"\n")
+            sys.stderr.write(f"[FunASR Worker]    Raw: \"{raw_text}\"\n")
+            sys.stderr.write(f"[FunASR Worker]    With punc: \"{punctuated_text}\"\n")
             sys.stderr.flush()
-            state.completed_sentences.append(final_sentence)
-            commit_start_time_sec = chunk_end_time_ms / 1000
-        
-        # 【关键修复】提交后清空所有缓冲区，重新开始
-        # 由于分句逻辑基于标点化文本，无法准确映射回原始文本
-        # 因此提交后清空，避免重复处理
-        transcript_prefix = " ".join(state.completed_sentences).strip()
-        state.unstable_raw_text = ""
-        state.raw_text_buffer = ""
-        state.stable_punctuated_text = ""
-        state.current_sentence.text = ""
-        state.last_partial_text = transcript_prefix
-        state.last_punc_time = 0.0
-        state.current_sentence.start_time = 0.0
-        
-        sys.stderr.write(f"[FunASR Worker] ✅ Buffers cleared after commit\n")
+
+            # C. 智能分句：将长文本拆分成多个自然句子
+            sentences = smart_split_sentences(punctuated_text)
+            
+            # 计算每个句子的大致时间分布
+            total_chars = sum(len(s) for s in sentences)
+            current_time = state.start_time * 1000 if state.start_time else timestamp_ms - (audio_duration * 1000)
+            
+            for i, sentence in enumerate(sentences):
+                # 估算这个句子的时间范围
+                sentence_ratio = len(sentence) / max(total_chars, 1)
+                sentence_duration = audio_duration * sentence_ratio
+                sentence_end_time = current_time + (sentence_duration * 1000)
+                
+                is_last = (i == len(sentences) - 1)
+                
+                sys.stderr.write(f"[FunASR Worker] 🎯 SENTENCE [{i+1}/{len(sentences)}]: \"{sentence[:50]}...\"\n")
+                sys.stderr.flush()
+
+                send_ipc_message({
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "type": "sentence_complete",
+                    "text": sentence,
+                    "raw_text": raw_text if i == 0 else "",  # 只在第一句附带原始文本
+                    "timestamp": int(sentence_end_time),
+                    "is_final": is_last,
+                    "status": "success",
+                    "language": "zh",
+                    "audio_duration": sentence_duration,
+                    "trigger": trigger,
+                    "start_time": int(current_time),
+                    "end_time": int(sentence_end_time),
+                    "sentence_index": i,
+                    "total_sentences": len(sentences),
+                })
+                
+                current_time = sentence_end_time
+
+    except Exception as e:
+        sys.stderr.write(f"[FunASR Worker] Pass 2 error: {e}\n")
+        sys.stderr.write(traceback.format_exc())
+        sys.stderr.flush()
+
+    # 重置状态，准备下一句
+    state.reset()
+
+
+def handle_force_commit(
+    asr_offline_model,
+    punc_model,
+    data: dict,
+    sessions_cache: Dict[str, SessionState],
+):
+    """强制提交当前句子"""
+    request_id = data.get("request_id", "default")
+    session_id = data.get("session_id", request_id)
+    timestamp_ms = int(time.time() * 1000)
+
+    sys.stderr.write(f"[FunASR Worker] force_commit received for session={session_id}\n")
+    sys.stderr.flush()
+
+    state = sessions_cache.get(session_id)
+    if not state:
+        sys.stderr.write(f"[FunASR Worker] No session state found for session={session_id}\n")
         sys.stderr.flush()
         return
-    
-    # 6. 更新当前句子缓冲区
-    state.current_sentence.text = f"{deferred_text}{remaining_text}".strip()
-    state.current_sentence.last_update_time = time.time()
 
-    if state.current_sentence.text:
-        if deferred_text:
-            state.current_sentence.start_time = sentence_start_time_sec or (chunk_start_time_ms / 1000)
-        else:
-            state.current_sentence.start_time = chunk_end_time_ms / 1000
-    else:
-        state.current_sentence.start_time = 0.0
-
-    # 7. 强制提交（超时或最终块）
-    if should_force_commit and state.unstable_raw_text:
-        # 【优化】对不稳定区域重新标点化，确保最终准确性
-        final_unstable = apply_incremental_punctuation(
-            state.stable_punctuated_text,
-            state.unstable_raw_text,
+    # 如果有缓冲的音频，触发 Pass 2
+    if state.full_sentence_buffer:
+        _trigger_pass2(
+            asr_offline_model,
             punc_model,
-            SENTENCE_END_PUNCTUATION,
-            context_sentences=PUNC_CONTEXT_SENTENCES
+            state,
+            request_id,
+            session_id,
+            timestamp_ms,
+            trigger="force_commit",
         )
-        final_text = f"{state.stable_punctuated_text}{final_unstable}".strip()
-        
-        start_ms = int(sentence_start_time_sec * 1000) if sentence_start_time_sec else int(chunk_start_time_ms)
+    elif state.streaming_text and len(state.streaming_text) >= MIN_SENTENCE_CHARS:
+        # 没有缓冲的音频，但有流式文本，直接提交流式文本
         send_ipc_message({
             "request_id": request_id,
             "session_id": session_id,
             "type": "sentence_complete",
-            "text": final_text,
+            "text": state.streaming_text,
             "timestamp": timestamp_ms,
-            "is_final": is_final,
+            "is_final": True,
             "status": "success",
+            "trigger": "force_commit_text_only",
             "language": "zh",
-            "audio_duration": audio_duration,
-            "start_time": start_ms,
-            "end_time": int(chunk_end_time_ms),
-            "trigger": "timeout" if not is_final else "final_chunk",
+            "audio_duration": 0,
         })
-        sys.stderr.write(f"[FunASR Worker] 🎯 FORCE_COMMIT: \"{final_text[:50]}...\"\n")
+        state.reset()
+    else:
+        sys.stderr.write(f"[FunASR Worker] force_commit: no content to commit\n")
         sys.stderr.flush()
-        state.completed_sentences.append(final_text)
-        state.current_sentence = SentenceBuffer()
-        state.last_partial_text = " ".join(state.completed_sentences).strip()
-        state.raw_text_buffer = ""
-        state.stable_punctuated_text = ""
-        state.unstable_raw_text = ""
-        state.last_punc_time = 0.0
-        return
 
 
-def handle_batch_file(stream_model: AutoModel, punc_model: AutoModel, data: Dict):
+def handle_batch_file(asr_offline_model, punc_model, data: dict):
     """处理批量文件识别"""
     request_id = data.get("request_id", "unknown")
     audio_path = data.get("audio_path")
@@ -513,28 +576,51 @@ def handle_batch_file(stream_model: AutoModel, punc_model: AutoModel, data: Dict
         return
 
     try:
-        import soundfile as sf
-        audio_array, sample_rate = sf.read(audio_path)
-        if audio_array.ndim > 1:
-            audio_array = audio_array.mean(axis=1)
+        # 读取音频文件
+        import wave
+        with wave.open(audio_path, 'rb') as wf:
+            audio_data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+            audio_float = audio_data.astype(np.float32)
 
-        # 批量识别
-        full_text = funasr_streaming_recognition(
-            audio_array,
-            stream_model,
-            {},
-            CHUNK_SIZE_LIST,
-            ENCODER_LOOK_BACK,
-            DECODER_LOOK_BACK,
-            is_final=True,
-        )
+        # 离线识别
+        offline_res = asr_offline_model(audio_float)
+        raw_text = ""
+        if offline_res:
+            # 解析返回值（可能是 tuple 或 dict）
+            item = offline_res[0] if isinstance(offline_res, list) else offline_res
+            if isinstance(item, dict):
+                raw_text = item.get("preds") or item.get("text") or ""
+            elif isinstance(item, (tuple, list)) and len(item) > 0:
+                raw_text = item[0] if isinstance(item[0], str) else str(item[0])
+            elif isinstance(item, str):
+                raw_text = item
+            else:
+                raw_text = str(item) if item else ""
 
-        # 应用标点
-        punctuated_text = apply_punctuation(full_text, punc_model)
+        # 标点
+        if raw_text:
+            try:
+                punc_res = punc_model(raw_text)
+                # 解析标点模型返回值
+                if punc_res:
+                    punc_item = punc_res[0] if isinstance(punc_res, list) else punc_res
+                    if isinstance(punc_item, str):
+                        final_text = punc_item
+                    elif isinstance(punc_item, (tuple, list)) and len(punc_item) > 0:
+                        final_text = punc_item[0] if isinstance(punc_item[0], str) else str(punc_item[0])
+                    else:
+                        final_text = str(punc_item) if punc_item else raw_text
+                else:
+                    final_text = raw_text
+            except Exception:
+                final_text = raw_text
+        else:
+            final_text = ""
 
         send_ipc_message({
             "request_id": request_id,
-            "text": punctuated_text,
+            "text": final_text,
+            "raw_text": raw_text,
             "language": "zh",
             "status": "success",
         })
@@ -547,88 +633,25 @@ def handle_batch_file(stream_model: AutoModel, punc_model: AutoModel, data: Dict
         })
 
 
-def handle_force_commit(data: Dict, sessions_cache: Dict[str, SessionState], punc_model: AutoModel):
-    """强制提交当前句子"""
-    request_id = data.get("request_id", "default")
-    session_id = data.get("session_id", request_id)
-
-    sys.stderr.write(f"[FunASR Worker] force_commit received for session={session_id}\n")
-    sys.stderr.flush()
-
-    state = sessions_cache.get(session_id)
-    if not state:
-        sys.stderr.write(f"[FunASR Worker] No session state found for session={session_id}\n")
-        sys.stderr.flush()
-        return
-
-    # 【优化】使用不稳定区域，增量标点化确保准确性
-    if state.unstable_raw_text and len(state.unstable_raw_text) >= MIN_SENTENCE_CHARS:
-        final_unstable = apply_incremental_punctuation(
-            state.stable_punctuated_text,
-            state.unstable_raw_text,
-            punc_model,
-            SENTENCE_END_PUNCTUATION,
-            context_sentences=PUNC_CONTEXT_SENTENCES
-        )
-        final_text = f"{state.stable_punctuated_text}{final_unstable}".strip()
-        
-        timestamp_ms = int(time.time() * 1000)
-        start_ms = int(state.current_sentence.start_time * 1000) if state.current_sentence.start_time else timestamp_ms
-        sys.stderr.write(f"[FunASR Worker] 🎯 FORCE_COMMIT (silence): \"{final_text[:50]}...\"\n")
-        sys.stderr.flush()
-        send_ipc_message({
-            "request_id": request_id,
-            "session_id": session_id,
-            "type": "sentence_complete",
-            "text": final_text,
-            "timestamp": timestamp_ms,
-            "is_final": True,
-            "status": "success",
-            "trigger": "silence_timeout",
-            "language": "zh",
-            "start_time": start_ms,
-            "audio_duration": 0,
-            "end_time": timestamp_ms,
-        })
-
-        # 记录已提交句子
-        state.completed_sentences.append(final_text)
-
-        # 重置状态
-        transcript_prefix = " ".join(state.completed_sentences).strip()
-        state.current_sentence = SentenceBuffer()
-        state.last_partial_text = transcript_prefix
-        state.raw_text_buffer = ""
-        state.stable_punctuated_text = ""
-        state.unstable_raw_text = ""
-        state.last_punc_time = 0.0
-    else:
-        sys.stderr.write(f"[FunASR Worker] force_commit: text too short or empty\n")
-        sys.stderr.flush()
-
-
 def main():
     try:
-        sys.stderr.write("[FunASR Worker] Starting FunASR Worker...\n")
+        sys.stderr.write("[FunASR Worker] Starting FunASR 2-Pass Worker...\n")
         sys.stderr.flush()
 
         # 加载模型
-        stream_model, punc_model, ts_model = load_funasr_models(
-            CACHE_DIR,
-            FUNASR_STRIDE_SAMPLES,
-            SAMPLE_RATE,
-        )
+        vad_model, asr_online_model, asr_offline_model, punc_model = load_funasr_onnx_models()
 
         sessions_cache: Dict[str, SessionState] = {}
         send_ipc_message({"status": "ready"})
 
-        sys.stderr.write("[FunASR Worker] Ready and waiting for input...\n")
+        sys.stderr.write("[FunASR Worker] Ready! 2-Pass mode enabled.\n")
         sys.stderr.flush()
 
         while True:
             line = sys.stdin.readline()
             if not line:
                 break
+
             try:
                 data = json.loads(line)
             except json.JSONDecodeError as exc:
@@ -646,15 +669,22 @@ def main():
                 continue
 
             if request_type == "force_commit":
-                handle_force_commit(data, sessions_cache, punc_model)
+                handle_force_commit(asr_offline_model, punc_model, data, sessions_cache)
                 continue
 
             if request_type == "streaming_chunk":
-                handle_streaming_chunk(stream_model, punc_model, data, sessions_cache)
+                handle_streaming_chunk(
+                    vad_model,
+                    asr_online_model,
+                    asr_offline_model,
+                    punc_model,
+                    data,
+                    sessions_cache,
+                )
                 continue
 
             if request_type == "batch_file" or "audio_path" in data:
-                handle_batch_file(stream_model, punc_model, data)
+                handle_batch_file(asr_offline_model, punc_model, data)
                 continue
 
             send_ipc_message({
