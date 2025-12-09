@@ -68,6 +68,25 @@ export default class LLMSuggestionService {
     return { suggestions: collected, metadata };
   }
 
+  normalizeDeltaContent(deltaContent) {
+    if (!deltaContent) return '';
+    if (typeof deltaContent === 'string') return deltaContent;
+    if (Array.isArray(deltaContent)) {
+      return deltaContent
+        .map((part) => {
+          if (!part) return '';
+          if (typeof part === 'string') return part;
+          if (typeof part.text === 'string') return part.text;
+          if (part.text?.value) return part.text.value;
+          if (part.text?.content) return part.text.content;
+          if (part.content) return String(part.content);
+          return '';
+        })
+        .join('');
+    }
+    return '';
+  }
+
   async generateSuggestionsStream(payload = {}, handlers = {}) {
     const {
       conversationId,
@@ -86,6 +105,7 @@ export default class LLMSuggestionService {
     const suggestionConfig = this.db.getSuggestionConfig();
     const count = this.sanitizeCount(optionCount ?? suggestionConfig?.suggestion_count, 3);
     const contextLimit = messageLimit || suggestionConfig?.context_message_limit || 10;
+    const thinkingEnabled = suggestionConfig?.thinking_enabled === 1 || suggestionConfig?.thinking_enabled === true;
     const client = await this.ensureClient();
     const modelName = this.resolveModelName(this.currentLLMConfig, suggestionConfig);
 
@@ -106,13 +126,15 @@ export default class LLMSuggestionService {
     const requestParams = {
       model: modelName,
       temperature: trigger === 'manual' ? 0.8 : 0.6,
-      max_tokens: 600,
+      max_tokens: 4096,
       stream: true,
+      // 根据配置决定是否启用思考过程
+      thinking: { type: thinkingEnabled ? 'enabled' : 'disabled' },
       messages: [
         {
           role: 'system',
           content:
-            '你是一个恋爱互动教练，负责根据当前对话状态，为玩家提供下一步回复的“话题方向 + 简要提示”。' +
+            '你是一个恋爱互动教练，负责根据当前对话状态，为玩家提供下一步回复的"话题方向 + 简要提示"。' +
             '请保持中文输出，语气自然友好。只输出 TOON 格式，遵循用户提供的表头，不要添加 JSON。'
         },
         {
@@ -125,10 +147,11 @@ export default class LLMSuggestionService {
     console.log('[LLMSuggestionService] Starting stream with payload:', payload);
 
     const abortController = new AbortController();
+    // 增加超时时间以适应 Thinking 模型较长的输出
     const timeoutId = setTimeout(() => {
-      console.error('[LLMSuggestionService] Stream timed out after', STREAM_TIMEOUT_MS, 'ms');
+      console.error('[LLMSuggestionService] Stream timed out after', STREAM_TIMEOUT_MS * 2, 'ms');
       abortController.abort(new Error('LLM生成超时，请稍后重试'));
-    }, STREAM_TIMEOUT_MS);
+    }, STREAM_TIMEOUT_MS * 2);
 
     let usageInfo = null;
     let emittedCount = 0;
@@ -190,36 +213,52 @@ export default class LLMSuggestionService {
       console.log('[LLMSuggestionService] OpenAI stream created successfully');
 
       console.log('[LLMSuggestionService] Starting to process chunks...');
+      let hasReceivedContent = false; // 标记是否已收到真正的content
+      
       for await (const chunk of stream) {
         chunkCount++;
-        const delta = chunk?.choices?.[0]?.delta?.content;
-        console.log(`[LLMSuggestionService] Processing chunk #${chunkCount}:`, {
-          hasContent: !!delta,
-          contentLength: delta?.length || 0,
-          finishReason: chunk?.choices?.[0]?.finish_reason,
-          hasUsage: !!chunk?.usage
-        });
+        const choice = chunk?.choices?.[0];
+        const deltaContent = choice?.delta?.content;
+        const reasoningContent = choice?.delta?.reasoning_content;
+        const delta = this.normalizeDeltaContent(deltaContent);
 
+        // 如果收到 reasoning_content，记录日志但忽略它（即使设置了 disabled，某些模型可能仍会返回）
+        if (reasoningContent && !delta) {
+          // 只在第一次收到思考内容时记录，避免日志过多
+          if (chunkCount <= 3) {
+            console.log(`[LLMSuggestionService] Received reasoning_content (ignored), waiting for content...`);
+          }
+          // 跳过这个chunk，不处理
+          continue;
+        }
+
+        // 只处理真正的 content 字段
         if (delta) {
+          if (!hasReceivedContent) {
+            hasReceivedContent = true;
+            console.log(`[LLMSuggestionService] First content chunk received at chunk #${chunkCount}`);
+          }
+          
           totalContentLength += delta.length;
           rawStreamContent += String(delta);
-          console.log(
-            `[LLMSuggestionService] Raw delta content (${delta.length} chars): "${String(delta).replace(/\n/g, '\\n')}"`
-          );
-          for (let i = 0; i < delta.length; i += 1) {
-            console.log(
-              `[LLMSuggestionService] delta char #${i}: "${String(delta[i]).replace(/\n/g, '\\n')}"`
-            );
+          
+          // 简化日志输出，避免过多细节
+          if (chunkCount % 50 === 0 || delta.length > 10) {
+            const preview = delta.length > 30 ? delta.slice(0, 30).replace(/\n/g, '\\n') + '...' : delta.replace(/\n/g, '\\n');
+            console.log(`[LLMSuggestionService] Chunk #${chunkCount}: content (${delta.length} chars) "${preview}"`);
           }
-          console.log('[LLMSuggestionService] Pushing content to parser...');
+          
+          // 立即推送到parser，实现真正的流式展示
           parser.push(delta);
         }
 
-        if (chunk?.choices?.[0]?.finish_reason) {
-          console.log(`[LLMSuggestionService] Stream finished with reason: ${chunk.choices[0].finish_reason}`);
+        // 检查流是否结束
+        if (choice?.finish_reason) {
+          console.log(`[LLMSuggestionService] Stream finished with reason: ${choice.finish_reason}`);
           parser.end();
         }
 
+        // 记录使用情况
         if (chunk?.usage) {
           console.log('[LLMSuggestionService] Received usage info:', chunk.usage);
           usageInfo = chunk.usage;
@@ -571,6 +610,8 @@ export default class LLMSuggestionService {
       temperature: 0,
       max_tokens: 120,
       stream: true,
+      // 情景判定模型必须关闭思考，避免拖慢触发判断
+      thinking: { type: 'disabled' },
       messages: [
         {
           role: 'system',
@@ -669,8 +710,16 @@ export default class LLMSuggestionService {
         (async () => {
           try {
             for await (const chunk of stream) {
-              const content = chunk?.choices?.[0]?.delta?.content;
+              const choice = chunk?.choices?.[0];
+              const reasoningContent = choice?.delta?.reasoning_content;
+              const content = this.normalizeDeltaContent(choice?.delta?.content);
+
+              // 忽略思考内容，确保判定尽快返回
+              if (reasoningContent && !content) {
+                continue;
+              }
               if (!content) continue;
+
               buffer += content;
               let newlineIndex = buffer.indexOf('\n');
               while (newlineIndex >= 0) {

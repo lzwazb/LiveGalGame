@@ -91,7 +91,8 @@ export class ToonSuggestionStreamParser {
       newlineIndex = this.buffer.indexOf('\n');
     }
     // 将当前未结束的行以 partial 形式暴露，便于前端流式展示
-    if (typeof this.onPartialSuggestion === 'function') {
+    // 只有在 header 已解析后才发送 partial，避免把 header 内容误当作 suggestion
+    if (typeof this.onPartialSuggestion === 'function' && this.headerParsed) {
       const partialLine = this.buffer.trim();
       if (partialLine) {
         this.onPartialSuggestion({

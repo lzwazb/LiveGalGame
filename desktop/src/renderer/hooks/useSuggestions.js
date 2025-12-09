@@ -249,8 +249,8 @@ export const useSuggestions = (sessionInfo) => {
       if (suggestionStatus === 'streaming') return;
 
       const now = Date.now();
-      const silenceSecondsRaw =
-        lastUserMessageTs != null ? (now - lastUserMessageTs) / 1000 : null;
+      const silenceBaseTs = lastUserMessageTs ?? lastCharacterMessageTs;
+      const silenceSecondsRaw = silenceBaseTs != null ? (now - silenceBaseTs) / 1000 : null;
       const silenceSeconds =
         silenceSecondsRaw != null
           ? Math.min(
@@ -576,9 +576,10 @@ export const useSuggestions = (sessionInfo) => {
   // 静默触发检查
   useEffect(() => {
     if (!suggestionConfig?.enable_passive_suggestion) return undefined;
-    if (!lastCharacterMessageTs) return undefined;
+    if (!lastCharacterMessageTs && !lastUserMessageTs) return undefined;
     const thresholdMs = (suggestionConfig?.silence_threshold_seconds || 3) * 1000;
-    const elapsed = lastUserMessageTs ? Date.now() - lastUserMessageTs : 0;
+    const baseTs = lastUserMessageTs ?? lastCharacterMessageTs;
+    const elapsed = baseTs ? Date.now() - baseTs : 0;
     const wait = Math.max(thresholdMs - elapsed, 0);
     const timer = setTimeout(() => {
       maybeRunSituationDetection('silence_timer', null);

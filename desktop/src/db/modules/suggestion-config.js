@@ -16,11 +16,12 @@ export default function SuggestionConfigManager(BaseClass) {
       ensureColumn('model_name', "ALTER TABLE suggestion_configs ADD COLUMN model_name TEXT DEFAULT 'gpt-4o-mini'");
       ensureColumn('situation_llm_enabled', 'ALTER TABLE suggestion_configs ADD COLUMN situation_llm_enabled INTEGER DEFAULT 0');
       ensureColumn('situation_model_name', "ALTER TABLE suggestion_configs ADD COLUMN situation_model_name TEXT DEFAULT 'gpt-4o-mini'");
+      ensureColumn('thinking_enabled', 'ALTER TABLE suggestion_configs ADD COLUMN thinking_enabled INTEGER DEFAULT 0');
 
       // 补齐已有行的默认值
       this.db
         .prepare(
-          "UPDATE suggestion_configs SET topic_detection_enabled = COALESCE(topic_detection_enabled, 0), model_name = COALESCE(NULLIF(TRIM(model_name), ''), 'gpt-4o-mini'), situation_llm_enabled = COALESCE(situation_llm_enabled, 0), situation_model_name = COALESCE(NULLIF(TRIM(situation_model_name), ''), 'gpt-4o-mini')"
+          "UPDATE suggestion_configs SET topic_detection_enabled = COALESCE(topic_detection_enabled, 0), model_name = COALESCE(NULLIF(TRIM(model_name), ''), 'gpt-4o-mini'), situation_llm_enabled = COALESCE(situation_llm_enabled, 0), situation_model_name = COALESCE(NULLIF(TRIM(situation_model_name), ''), 'gpt-4o-mini'), thinking_enabled = COALESCE(thinking_enabled, 0)"
         )
         .run();
 
@@ -49,6 +50,7 @@ export default function SuggestionConfigManager(BaseClass) {
           situation_llm_enabled,
           model_name,
           situation_model_name,
+          thinking_enabled,
           created_at,
           updated_at
         ) VALUES (
@@ -63,6 +65,7 @@ export default function SuggestionConfigManager(BaseClass) {
           @situation_llm_enabled,
           @model_name,
           @situation_model_name,
+          @thinking_enabled,
           @created_at,
           @updated_at
         )
@@ -80,6 +83,7 @@ export default function SuggestionConfigManager(BaseClass) {
         situation_llm_enabled: 0,
         model_name: 'gpt-4o-mini',
         situation_model_name: 'gpt-4o-mini',
+        thinking_enabled: 0,
         created_at: now,
         updated_at: now
       });
@@ -117,7 +121,8 @@ export default function SuggestionConfigManager(BaseClass) {
         'topic_detection_enabled',
         'situation_llm_enabled',
         'model_name',
-        'situation_model_name'
+        'situation_model_name',
+        'thinking_enabled'
       ];
 
       updatableFields.forEach((field) => {

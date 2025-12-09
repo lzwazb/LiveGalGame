@@ -55,8 +55,19 @@ function getRepoPathsForModel(preset, cacheDir) {
   }
   if (preset.modelScopeRepoId) {
     paths.push(path.join(cacheDir, 'models', preset.modelScopeRepoId));
+    paths.push(path.join(cacheDir, preset.modelScopeRepoId));
     // 额外加入默认的 ModelScope 全局缓存目录，避免进度一直为 0
     paths.push(path.join(os.homedir(), '.cache', 'modelscope', 'hub', 'models', preset.modelScopeRepoId));
+    paths.push(path.join(os.homedir(), '.cache', 'modelscope', 'hub', preset.modelScopeRepoId));
+  }
+
+  // FunASR onnx 模型也需要参与缓存探测（funasr_onnx 默认放在 modelscope 下）
+  if (preset.onnxModels) {
+    const modelDirs = Array.from(new Set(Object.values(preset.onnxModels).filter(Boolean)));
+    modelDirs.forEach((modelDir) => {
+      paths.push(path.join(cacheDir, modelDir));
+      paths.push(path.join(cacheDir, 'models', modelDir));
+    });
   }
   return paths;
 }
@@ -107,6 +118,7 @@ function getModelCacheCandidates() {
     process.env.ASR_CACHE_DIR,
     process.env.HF_HOME ? path.join(process.env.HF_HOME, 'hub') : null,
     path.join(userDataDir, 'hf-home', 'hub'),
+    path.join(userDataDir, 'ms-cache'),
     homeDir ? path.join(homeDir, '.cache', 'huggingface', 'hub') : null,
     homeDir ? path.join(homeDir, '.cache', 'modelscope', 'hub') : null,
   ].filter(Boolean);
@@ -142,6 +154,74 @@ function resolveModelCache(modelName) {
   }
 
   return { cacheDir: candidates[0] || path.join(app.getPath('userData'), 'hf-home', 'hub'), found: false };
+}
+
+// 针对 funasr_onnx：优先复用已存在的 ModelScope 缓存目录，避免重复下载
+function resolveFunasrModelScopeCache(preset) {
+  if (!preset?.onnxModels) {
+    return null;
+  }
+  const modelDirs = Array.from(new Set(Object.values(preset.onnxModels).filter(Boolean)));
+  
+  // 1. 优先检查系统默认 ModelScope 缓存目录 (~/.cache/modelscope/hub)
+  // 这是 funasr_onnx 库默认下载的位置，如果模型已存在则直接使用，避免重复下载
+  const systemMsCache = path.join(os.homedir(), '.cache', 'modelscope', 'hub');
+  try {
+    let systemHit = false;
+    let systemBytes = 0;
+    for (const dir of modelDirs) {
+      const p1 = path.join(systemMsCache, dir);
+      const p2 = path.join(systemMsCache, 'models', dir);
+      if (fs.existsSync(p1)) {
+        systemHit = true;
+        systemBytes += safeDirSize(p1);
+      } else if (fs.existsSync(p2)) {
+        systemHit = true;
+        systemBytes += safeDirSize(p2);
+      }
+    }
+    // 如果系统目录有模型（至少找到一个），优先使用系统目录
+    if (systemHit && systemBytes > 0) {
+      return { cacheDir: systemMsCache, found: true };
+    }
+  } catch {
+    // ignore and continue
+  }
+  
+  // 2. 检查其他候选目录，选择模型最完整的
+  const candidates = getModelCacheCandidates();
+  let best = null;
+  let bestBytes = -1;
+  for (const candidate of candidates) {
+    // 跳过系统目录（已在上面检查过）
+    if (candidate === systemMsCache) continue;
+    
+    try {
+      let hit = false;
+      let bytes = 0;
+      for (const dir of modelDirs) {
+        const p1 = path.join(candidate, dir);
+        const p2 = path.join(candidate, 'models', dir);
+        if (fs.existsSync(p1)) {
+          hit = true;
+          bytes += safeDirSize(p1);
+        } else if (fs.existsSync(p2)) {
+          hit = true;
+          bytes += safeDirSize(p2);
+        }
+      }
+      if (hit && bytes > bestBytes) {
+        best = { cacheDir: candidate, found: true };
+        bestBytes = bytes;
+      }
+    } catch {
+      // ignore and continue
+    }
+  }
+  if (best) return best;
+  
+  // 3. 如果都没有，使用系统默认目录（funasr_onnx 会下载到这里）
+  return { cacheDir: systemMsCache, found: false };
 }
 
 function detectPythonPath() {
@@ -327,9 +407,29 @@ class ASRService {
     this.modelCacheDir = cacheDir;
     this.modelCacheFound = found;
 
+    // FunASR 模型：尝试自动复用已存在的 ModelScope 缓存，避免重复下载
+    let msCacheEnv = process.env.MODELSCOPE_CACHE || path.join(app.getPath('userData'), 'ms-cache');
+    if (this.engine === 'funasr' && this.modelPreset?.onnxModels) {
+      const funasrMs = resolveFunasrModelScopeCache(this.modelPreset);
+      if (funasrMs?.cacheDir) {
+        logger.log(`[ASR] FunASR ModelScope cache resolved: ${funasrMs.cacheDir} (found=${funasrMs.found})`);
+        msCacheEnv = funasrMs.cacheDir;
+        if (funasrMs.found) {
+          // 记录已存在缓存，便于后续进度判定
+          this.modelCacheFound = true;
+          logger.log(`[ASR] Using existing ModelScope cache at: ${msCacheEnv}`);
+        }
+      }
+    }
+
     // 计算已有缓存，若已下载完成则不再上报进度
     const presetSize = this.modelPreset?.sizeBytes || null;
-    const repoPaths = getRepoPathsForModel(this.modelPreset, cacheDir);
+    const repoPathsSet = new Set(getRepoPathsForModel(this.modelPreset, cacheDir));
+    // funasr 需要把 ModelScope onnx 目录也纳入探测
+    if (this.engine === 'funasr' && this.modelPreset?.onnxModels && msCacheEnv) {
+      getRepoPathsForModel(this.modelPreset, msCacheEnv).forEach((p) => repoPathsSet.add(p));
+    }
+    const repoPaths = Array.from(repoPathsSet);
     const initialDownloaded = repoPaths.length ? repoPaths.reduce((sum, p) => sum + safeDirSize(p), 0) : 0;
     const cachedEnough = presetSize
       ? initialDownloaded >= presetSize * 0.9
@@ -341,6 +441,9 @@ class ASRService {
     const isLargeModel = this.modelName.toLowerCase().includes('large');
     const useQuantize = this.modelPreset?.quantize !== false && !isLargeModel;
 
+    // 如果检测到已有完整缓存，启用离线模式避免每次启动都联网检查版本
+    const useOfflineMode = this.modelCacheFound && cachedEnough;
+    
     const env = {
       ...process.env,
       ASR_ENGINE: this.engine,
@@ -349,11 +452,18 @@ class ASRService {
       ASR_PORT: String(this.serverPort),
       ASR_QUANTIZE: useQuantize ? 'true' : 'false',
       HF_HOME: process.env.HF_HOME || path.join(app.getPath('userData'), 'hf-home'),
-      ASR_CACHE_DIR: cacheDir,
-      MODELSCOPE_CACHE: process.env.MODELSCOPE_CACHE || path.join(app.getPath('userData'), 'ms-cache'),
-      MODELSCOPE_CACHE_HOME: process.env.MODELSCOPE_CACHE || path.join(app.getPath('userData'), 'ms-cache'),
+      ASR_CACHE_DIR: this.engine === 'funasr' ? msCacheEnv : cacheDir,
+      MODELSCOPE_CACHE: msCacheEnv,
+      MODELSCOPE_CACHE_HOME: msCacheEnv,
+      // 启用离线模式：跳过 ModelScope 版本检查，直接使用本地缓存
+      MODELSCOPE_OFFLINE: useOfflineMode ? '1' : '',
+      HF_HUB_OFFLINE: useOfflineMode ? '1' : '',
       PYTHONUNBUFFERED: '1',
     };
+    
+    if (useOfflineMode) {
+      logger.log(`[ASR] Offline mode enabled: using local cache without version check`);
+    }
 
     ensureDir(env.HF_HOME);
     ensureDir(cacheDir);
