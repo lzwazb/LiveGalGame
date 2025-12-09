@@ -18,7 +18,7 @@ export function ASRModelCard({
   const isActive = isPresetActive(preset, activeModelId);
   const updatedAt = status.updatedAt ? new Date(status.updatedAt).toLocaleString() : null;
   const progressVisible = (totalBytes > 0 && (activeDownload || (downloadedBytes > 0 && !isDownloaded))) || (activeDownload && status.progressMessage);
-  const engine = preset.engine || 'faster-whisper';
+  const engine = preset.engine || 'funasr';
   const canResume = !isDownloaded && downloadedBytes > 0 && !activeDownload;
   const progressMessage = status.progressMessage;
 

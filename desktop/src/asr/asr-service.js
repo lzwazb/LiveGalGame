@@ -244,6 +244,7 @@ class ASRService {
     this.modelCachePreDownloaded = false;
     this.shouldReportProgress = true;
     this.serverProcess = null;
+    this.isDownloading = false;
     this.serverHost = DEFAULT_HOST;
     this.serverPort = null;
     this.serverReady = false;
@@ -280,7 +281,7 @@ class ASRService {
     this.modelName = modelName || this.modelName;
     const preset = getAsrModelPreset(modelName);
     this.modelPreset = preset;
-    this.engine = preset?.engine || 'faster-whisper';
+    this.engine = preset?.engine || 'funasr';
     this.retainAudioFiles = options.retainAudioFiles || false;
     this.audioStoragePath = options.audioStoragePath || this.audioStoragePath;
     ensureDir(this.audioStoragePath);
@@ -301,6 +302,7 @@ class ASRService {
     // Pick a free port dynamically
     const port = await portfinder.getPortPromise({ port: Number(process.env.ASR_PORT) || 18000 });
     this.serverPort = port;
+    this.isDownloading = false;
 
     try {
       await killPort(port);
@@ -377,11 +379,33 @@ class ASRService {
     });
 
     this.serverProcess.stderr.on('data', (data) => {
-      logger.log(`[ASR Backend][stderr] ${data.toString().trim()}`);
+      const text = data.toString();
+      const lines = text.split('\n');
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        logger.log(`[ASR Backend][stderr] ${line}`);
+
+        // 简单关键字检测：只要出现 Downloading Model 视为正在下载
+        if (!this.isDownloading && line.includes('Downloading Model')) {
+          this.isDownloading = true;
+        }
+        // 下载完成/就绪的关键字，清除下载标记
+        if (
+          this.isDownloading &&
+          (line.includes('All models loaded successfully')
+            || line.includes('Worker is READY')
+            || line.includes('Worker is READY!')
+            || line.includes('Received READY signal'))
+        ) {
+          this.isDownloading = false;
+        }
+      }
     });
 
     this.serverProcess.on('close', (code, signal) => {
       const isExpectedStop = this.isStopping || code === 0;
+      this.isDownloading = false;
       if (isExpectedStop) {
         logger.log(`[ASR Backend] exited normally (code=${code}, signal=${signal ?? 'none'})`);
       } else {
@@ -399,6 +423,7 @@ class ASRService {
       logger.error('[ASR Backend] process error:', error);
       this.serverProcess = null;
       this.serverReady = false;
+      this.isDownloading = false;
     });
 
     await this.waitForHealth();
@@ -454,6 +479,7 @@ class ASRService {
               isDownloaded: true,
             });
           }
+          this.isDownloading = false;
           this.serverReady = true;
           return true;
         }
@@ -512,6 +538,10 @@ class ASRService {
       });
     }
     throw new Error('FastAPI backend health check timeout');
+  }
+
+  getDownloadStatus() {
+    return { downloading: this.isDownloading };
   }
 
   getSession(sourceId) {

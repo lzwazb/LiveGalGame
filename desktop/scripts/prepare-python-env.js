@@ -219,7 +219,6 @@ function installDeps() {
             'torchaudio==2.2.2',
             'funasr-onnx==0.4.1',
             'onnxruntime==1.21.1',
-            'faster-whisper==0.10.0',
             'fastapi>=0.115.0',
             'uvicorn[standard]>=0.30.0',
             'websockets>=12.0',

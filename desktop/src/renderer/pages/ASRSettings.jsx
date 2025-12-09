@@ -32,7 +32,7 @@ function ASRSettings() {
 
   // 按引擎分组模型
   const modelsByEngine = modelPresets.reduce((acc, preset) => {
-    const engine = preset.engine || 'faster-whisper';
+    const engine = preset.engine || 'funasr';
     if (!acc[engine]) {
       acc[engine] = [];
     }
@@ -40,14 +40,9 @@ function ASRSettings() {
     return acc;
   }, {});
 
-  const engineNames = {
-    'funasr': 'FunASR',
-    'faster-whisper': 'Faster-Whisper'
-  };
-
   // 表单数据
   const [formData, setFormData] = useState({
-    model_name: 'medium',
+    model_name: 'funasr-paraformer',
     language: 'zh',
     enable_vad: true,
     sentence_pause_threshold: 1.0,
@@ -405,7 +400,7 @@ function ASRSettings() {
   // 重置表单
   const resetForm = () => {
     setFormData({
-      model_name: modelPresets[0]?.id || 'medium',
+      model_name: modelPresets[0]?.id || 'funasr-paraformer',
       language: 'zh',
       enable_vad: true,
       sentence_pause_threshold: 1.0,

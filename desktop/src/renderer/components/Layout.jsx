@@ -7,6 +7,8 @@ function Layout({ children }) {
   const logoId = useId();
   const [downloadStatus, setDownloadStatus] = useState(null);
   const hideTimerRef = useRef(null);
+  const [hudNotice, setHudNotice] = useState(null);
+  const hudNoticeTimerRef = useRef(null);
 
   const isActive = (path) => {
     if (path === '/') {
@@ -119,6 +121,64 @@ function Layout({ children }) {
       });
       if (hideTimerRef.current) {
         clearTimeout(hideTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.on) {
+      return undefined;
+    }
+
+    const safeNumber = (value) => (typeof value === 'number' && !Number.isNaN(value) ? value : null);
+
+    const handleHudLoading = (payload = {}) => {
+      if (hudNoticeTimerRef.current) {
+        clearTimeout(hudNoticeTimerRef.current);
+      }
+      const waitedSeconds = safeNumber(payload.waitedSeconds);
+      const message = payload.message
+        || (payload.downloading
+          ? '正在下载语音模型，首次下载可能较慢，请耐心等待...'
+          : 'ASR 模型正在加载，HUD 将在就绪后自动打开');
+      setHudNotice({
+        message,
+        waitedSeconds,
+        ready: false,
+        downloading: Boolean(payload.downloading)
+      });
+      if (api.log) {
+        try {
+          const waitedLabel = waitedSeconds !== null ? `（已等待 ${waitedSeconds.toFixed(1)}s）` : '';
+          api.log(`[HUD] ${message}${waitedLabel}`);
+        } catch (error) {
+          console.warn('[HUD] 记录日志失败:', error);
+        }
+      }
+    };
+
+    const handleHudReady = (payload = {}) => {
+      const waitedSeconds = safeNumber(payload.waitedSeconds);
+      setHudNotice((prev) => ({
+        message: payload.message || 'ASR 模型已就绪，正在打开 HUD',
+        waitedSeconds: waitedSeconds ?? prev?.waitedSeconds ?? null,
+        ready: true
+      }));
+      if (hudNoticeTimerRef.current) {
+        clearTimeout(hudNoticeTimerRef.current);
+      }
+      hudNoticeTimerRef.current = setTimeout(() => setHudNotice(null), 3000);
+    };
+
+    api.on('hud-loading', handleHudLoading);
+    api.on('hud-ready', handleHudReady);
+
+    return () => {
+      api.removeListener?.('hud-loading', handleHudLoading);
+      api.removeListener?.('hud-ready', handleHudReady);
+      if (hudNoticeTimerRef.current) {
+        clearTimeout(hudNoticeTimerRef.current);
       }
     };
   }, []);
@@ -425,6 +485,33 @@ function Layout({ children }) {
 
         {/* 主内容区域 */}
         <main className="flex-1 overflow-y-auto" style={{ paddingTop: '40px' }}>
+          {hudNotice && (
+            <div className="px-6 pt-4">
+              <div className={`rounded-xl border ${hudNotice.ready ? 'border-green-200 bg-green-50' : 'border-amber-200 bg-amber-50'} shadow-sm`}>
+                <div className="flex items-start justify-between gap-3 px-4 py-3">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">
+                      {hudNotice.ready ? 'ASR 模型已就绪，正在打开 HUD' : 'ASR 模型加载中，HUD 将在就绪后弹出'}
+                    </div>
+                    <div className="text-xs text-gray-700 mt-1">
+                      {hudNotice.message}
+                      {typeof hudNotice.waitedSeconds === 'number'
+                        ? `（已等待 ${hudNotice.waitedSeconds.toFixed(1)}s）`
+                        : ''}
+                    </div>
+                  </div>
+                  <button
+                    className="text-gray-500 hover:text-gray-700 text-sm"
+                    onClick={() => setHudNotice(null)}
+                    title="关闭提示"
+                    style={{ WebkitAppRegion: 'no-drag' }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
           {downloadStatus && (
             <div className="px-6 pt-4">
               <div className="rounded-xl border border-blue-200 bg-white shadow-sm">

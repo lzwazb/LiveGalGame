@@ -35,7 +35,6 @@ export function isPresetActive(preset, activeModelId) {
 
 export const engineNames = {
   funasr: 'FunASR',
-  'faster-whisper': 'Faster-Whisper',
 };
 
 export const languageOptions = [

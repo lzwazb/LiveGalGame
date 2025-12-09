@@ -1,7 +1,7 @@
 /**
  * Build Python backend (FastAPI + workers) via PyInstaller.
  * - 打包 main.py 为主入口 (asr-backend)
- * - 同时打包每个 worker 为独立可执行文件 (asr-funasr-worker, asr-faster-whisper-worker)
+ * - 同时打包每个 worker 为独立可执行文件 (asr-funasr-worker)
  * - Windows: onefile exe
  * - macOS/Linux: onedir
  */
@@ -68,20 +68,17 @@ function main() {
     `--workpath "${buildDir}"`,
     // 打包 asr 目录，便于运行时子进程直接调用 python 脚本（不再构建独立 worker 可执行文件）
     `--add-data "${asrDir}${dataSep}asr"`,
-    // 隐式依赖收集：确保 funasr_onnx / faster_whisper / torch 等在主包中一次性收集
+    // 隐式依赖收集：确保 funasr_onnx / torch 等在主包中一次性收集
     '--collect-submodules funasr_onnx',
-    '--collect-submodules faster_whisper',
     '--collect-submodules torch',
     '--collect-submodules ctranslate2',
     '--collect-submodules tokenizers',
     '--collect-submodules sentencepiece',
-    '--collect-all faster_whisper',
     '--collect-all ctranslate2',
     '--collect-all tokenizers',
     '--collect-all sentencepiece',
     '--collect-all numpy',
     '--hidden-import funasr_onnx',
-    '--hidden-import faster_whisper',
     '--hidden-import torch',
   ];
 

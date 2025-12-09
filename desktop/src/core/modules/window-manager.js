@@ -118,6 +118,13 @@ export class WindowManager {
     this.hudCreateNotified = false;
 
     try {
+      const parentWindow = this.getMainWindow();
+      const notifyHudLoading = (payload) => {
+        if (parentWindow) {
+          parentWindow.webContents.send('hud-loading', payload);
+        }
+      };
+
       // 检查ASR模型是否就绪，如果未就绪则等待
       console.log('[HUD] 检查ASR模型状态...');
       let checkAttempts = 0;
@@ -125,21 +132,48 @@ export class WindowManager {
 
       while (checkAttempts < maxAttempts) {
         const status = await checkASRReady();
+        const waitedSeconds = Number(((checkAttempts * 100) / 1000).toFixed(1));
         if (status.ready) {
           console.log('[HUD] ASR模型已就绪:', status.message);
+          if (parentWindow) {
+            parentWindow.webContents.send('hud-ready', {
+              message: 'ASR模型已就绪，正在打开HUD...',
+              waitedSeconds,
+              from: 'hud'
+            });
+          }
           break;
         }
 
         if (checkAttempts === 0) {
           console.log('[HUD] ASR模型未就绪，等待加载:', status.message);
+          notifyHudLoading({
+            message: status.message || 'ASR模型正在加载，请稍候...',
+            waitedSeconds,
+            downloading: status.downloading,
+            from: 'hud'
+          });
         } else if (checkAttempts % 10 === 0) {
           // 每1秒输出一次状态
           const waitedMs = checkAttempts * 100;
           console.log(`[HUD] 等待ASR模型加载中... (${(waitedMs / 1000).toFixed(1)}s)`);
+          notifyHudLoading({
+            message: status.message || 'ASR模型正在加载，请稍候...',
+            waitedSeconds,
+            downloading: status.downloading,
+            from: 'hud'
+          });
         } else if (checkAttempts % 100 === 0) {
           // 每10秒输出一次详细提示
           const waitedSec = (checkAttempts * 100) / 1000;
           console.log(`[HUD] ASR仍在加载，可能正在下载模型，请稍候... 已等待 ${waitedSec.toFixed(0)}s`);
+          notifyHudLoading({
+            message: status.message || 'ASR模型正在加载，请稍候...',
+            waitedSeconds,
+            downloading: status.downloading,
+            from: 'hud',
+            detailed: true
+          });
         }
 
         checkAttempts++;
@@ -148,6 +182,12 @@ export class WindowManager {
 
       if (checkAttempts >= maxAttempts) {
         console.warn('[HUD] ASR模型加载超时，但继续创建HUD窗口');
+        notifyHudLoading({
+          message: '等待ASR模型加载超时，仍尝试打开HUD，请稍候',
+          waitedSeconds: Number(((checkAttempts * 100) / 1000).toFixed(1)),
+          from: 'hud',
+          timedOut: true
+        });
       } else {
         console.log(`[HUD] ASR模型就绪，等待时间: ${(checkAttempts * 100 / 1000).toFixed(1)}s`);
       }

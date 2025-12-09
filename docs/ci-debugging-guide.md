@@ -148,21 +148,19 @@ browser_click({ element: "in progress: Run ...", ref: "e211" })
      cd /tmp && unzip -o run-19983014012.log -d run-19983014012-logs
      tail -n 120 "run-19983014012-logs/0_Desktop mac (arm64).txt"
      ```
-   - 关键报错（摘录）：  
-     ```
-     error    libmamba Could not solve for environment specs
-       └─ faster-whisper =0.10 * does not exist (perhaps a typo or a missing channel).
-     Error: Command failed: .../mamba install -y -p ... ffmpeg av=10.* faster-whisper=0.10.*
-     ```
-   - 结论：conda-forge 没有 `faster-whisper=0.10.*` 的包，mamba 解算失败，`prepare-python-env.js` 随之退出。
+  - 关键报错（旧记录，faster-whisper 已移除，仅保留参考）：  
+    ```
+    error    libmamba Could not solve for environment specs
+      └─ faster-whisper =0.10 * does not exist (perhaps a typo or a missing channel).
+    Error: Command failed: .../mamba install -y -p ... ffmpeg av=10.* faster-whisper=0.10.*
+    ```
+    现已去除 faster-whisper 依赖，无需处理该问题。
 
 4) 修复方向（供后续操作参考）  
-   - 方案 A：改为 pip 安装 faster-whisper，conda 仅装 ffmpeg/av。  
-   - 方案 B：在 conda-forge 可用的版本范围内调整 faster-whisper 版本约束。  
-   - 方案 C：去掉 mamba 对 faster-whisper 的安装，仅保留 pip 安装。
+  - FunASR 构建：保持 ffmpeg/av 与 funasr_onnx 兼容即可。
 
 ### 最新经验（2025-12-06）
-- mac 构建依赖匹配：`faster-whisper==0.10.0` 预编译轮子使用 `av` 10.x，已在 `requirements.txt` 固定 `av==10.0.0`，`prepare-python-env.js` 中 mamba 只安装 `ffmpeg` + `av==10.0.0`，`faster-whisper` 由 pip 安装（同时锁 `numpy<2`）可避免解算/ABI 冲突。
+- 当前已去除 faster-whisper，仅需确保 funasr_onnx 及其依赖正常安装。
 - 日志/模型下载前务必先开启代理：在 Runner 或本地执行 `dl1` 启用代理后再跑 curl/pip/HF 下载，否则可能超时或 SOCKS 依赖缺失导致模型注册失败。
 - 若 GitHub 日志直链下载报 HTTP2 framing 错误，可尝试加 `--http1.1`：`curl --http1.1 -L -o run.log https://api.github.com/.../logs`。
 

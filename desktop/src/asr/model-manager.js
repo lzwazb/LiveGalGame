@@ -6,7 +6,6 @@ import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { ASR_MODEL_PRESETS, getAsrModelPreset } from '../shared/asr-models.js';
 
-const DOWNLOAD_SCRIPT = path.join(app.getAppPath(), 'scripts', 'download_asr_model.py');
 const DOWNLOAD_FUNASR_SCRIPT = path.join(app.getAppPath(), 'scripts', 'download_funasr_model.py');
 
 function safeReaddir(targetPath) {
@@ -99,7 +98,7 @@ export default class ASRModelManager extends EventEmitter {
       // ignore mkdir errors
     }
 
-    // Also check system default HuggingFace cache (where faster-whisper actually downloads models)
+    // Also check system default HuggingFace cache (preexisting downloads)
     this.systemHfCache = path.join(os.homedir(), '.cache', 'huggingface', 'hub');
     // And system default ModelScope cache
     this.systemMsCache = path.join(os.homedir(), '.cache', 'modelscope', 'hub');
@@ -354,7 +353,7 @@ export default class ASRModelManager extends EventEmitter {
     }
 
     // Check ModelScope cache
-    // ModelScope structure: cacheDir / repoId (e.g. gpustack/faster-whisper-medium)
+    // ModelScope structure: cacheDir / repoId (e.g. damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx)
     // or sometimes cacheDir / repoId / .mv / ...
     // Simple check: cacheDir / repoId
     let msSnapshotPath = null;
@@ -475,36 +474,16 @@ export default class ASRModelManager extends EventEmitter {
       throw new Error('Python executable not found');
     }
 
-    const repoId = source === 'modelscope' && preset.modelScopeRepoId ? preset.modelScopeRepoId : preset.repoId;
+    const repoId = preset.modelScopeRepoId || preset.repoId;
 
-    let scriptPath = DOWNLOAD_SCRIPT;
-    let args = [];
-    
-    if (preset.engine === 'funasr') {
-        scriptPath = DOWNLOAD_FUNASR_SCRIPT;
-        args = [
-            scriptPath,
-            '--model-id',
-            preset.id,
-            '--cache-dir',
-            this.msCache // FunASR 默认用 ModelScope 缓存
-        ];
-    } else {
-        const jobs = Math.max(2, Math.min(8, Math.floor((os.cpus()?.length || 4) / 2)) || 2);
-        args = [
-            scriptPath,
-            '--model-id',
-            preset.id,
-            '--repo-id',
-            repoId,
-            '--cache-dir',
-            this.cacheDir,
-            '--jobs',
-            String(jobs),
-            '--source',
-            source
-        ];
-    }
+    const scriptPath = DOWNLOAD_FUNASR_SCRIPT;
+    const args = [
+      scriptPath,
+      '--model-id',
+      preset.id,
+      '--cache-dir',
+      this.msCache // FunASR 默认用 ModelScope 缓存
+    ];
 
     console.log(`[ASR ModelManager] Starting download: modelId=${modelId}, source=${source}, repoId=${repoId}`);
     console.log(`[ASR ModelManager] Python path: ${pythonExecutable}`);
@@ -576,18 +555,6 @@ export default class ASRModelManager extends EventEmitter {
         });
       } else {
         console.error(`[ASR ModelManager] Download failed: modelId=${modelId}, code=${code}, source=${source}`);
-
-        // 失败且具备 ModelScope 资源时自动回退一次
-        if (allowFallback && source === 'huggingface' && preset.modelScopeRepoId) {
-          console.warn(`[ASR ModelManager] Falling back to ModelScope for ${modelId}`);
-          this.broadcast('asr-model-download-log', {
-            modelId,
-            repoId,
-            message: 'HuggingFace 下载失败，尝试使用 ModelScope 源...'
-          });
-          return this.startDownload(modelId, 'modelscope', false);
-        }
-
         this.broadcast('asr-model-download-error', {
           modelId,
           repoId: repoId,

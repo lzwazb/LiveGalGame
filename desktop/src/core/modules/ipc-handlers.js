@@ -203,6 +203,16 @@ export class IPCManager {
    * 检查 ASR 模型是否就绪
    */
   async checkASRReady() {
+    const isDownloading = this.asrManager?.whisperService?.isDownloading === true;
+
+    if (isDownloading) {
+      return {
+        ready: false,
+        message: '正在下载语音模型，首次下载可能较慢，请耐心等待...',
+        downloading: true
+      };
+    }
+
     if (this.asrModelPreloading) {
       return {
         ready: false,

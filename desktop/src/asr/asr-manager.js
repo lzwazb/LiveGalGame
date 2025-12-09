@@ -117,7 +117,7 @@ class ASRManager {
 
 
       // 确定模型名称：优先使用配置中的值，默认为 'funasr-paraformer' (FunASR)
-      // Windows 也默认使用 FunASR ONNX，不再强制切换 faster-whisper
+      // Windows 也默认使用 FunASR ONNX
       let modelName = config.model_name || 'funasr-paraformer';
       this.modelName = modelName;
       logger.log(`Selected ASR model: ${modelName}`);
