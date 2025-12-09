@@ -7,6 +7,7 @@ import { EventEmitter } from 'events';
 import { ASR_MODEL_PRESETS, getAsrModelPreset } from '../shared/asr-models.js';
 
 const DOWNLOAD_SCRIPT = path.join(app.getAppPath(), 'scripts', 'download_asr_model.py');
+const DOWNLOAD_FUNASR_SCRIPT = path.join(app.getAppPath(), 'scripts', 'download_funasr_model.py');
 
 function safeReaddir(targetPath) {
   try {
@@ -251,10 +252,14 @@ export default class ASRModelManager extends EventEmitter {
     const modelDirs = Object.values(onnxModels);
 
     // funasr_onnx 使用的缓存目录
+    // 注意：ModelScope 有时会将模型放在 hub/models/ 下，有时直接在 hub/ 下
     const funasrCacheDirs = [
       path.join(os.homedir(), '.cache', 'modelscope', 'hub'),
+      path.join(os.homedir(), '.cache', 'modelscope', 'hub', 'models'),
       this.msCache,
+      path.join(this.msCache, 'models'),
       this.systemMsCache,
+      path.join(this.systemMsCache, 'models'),
     ];
 
     let totalDownloadedBytes = 0;
@@ -445,6 +450,26 @@ export default class ASRModelManager extends EventEmitter {
     if (!preset) {
       throw new Error(`Unknown ASR model: ${modelId}`);
     }
+
+    // FunASR ONNX 模型由 funasr-onnx 库自己管理下载
+    // 我们可以调用辅助脚本来触发这个下载过程
+    if (preset.engine === 'funasr' && preset.onnxModels) {
+      const status = this.getFunASROnnxModelStatus(modelId, preset);
+      if (status.isDownloaded) {
+        console.log(`[ASR ModelManager] FunASR ONNX model ${modelId} is already downloaded`);
+        this.broadcast('asr-model-download-complete', {
+          modelId,
+          repoId: preset.repoId,
+          status,
+        });
+        return { status: 'completed' };
+      }
+      
+      // 未下载，继续执行，使用 download_funasr_model.py
+      console.log(`[ASR ModelManager] FunASR ONNX model ${modelId} will be downloaded via script`);
+      // 不返回 'auto-download'，而是继续执行后续的 spawn 逻辑，但要替换 script 和 args
+    }
+
     const pythonExecutable = this.pythonPath;
     if (!pythonExecutable) {
       throw new Error('Python executable not found');
@@ -452,25 +477,38 @@ export default class ASRModelManager extends EventEmitter {
 
     const repoId = source === 'modelscope' && preset.modelScopeRepoId ? preset.modelScopeRepoId : preset.repoId;
 
+    let scriptPath = DOWNLOAD_SCRIPT;
+    let args = [];
+    
+    if (preset.engine === 'funasr') {
+        scriptPath = DOWNLOAD_FUNASR_SCRIPT;
+        args = [
+            scriptPath,
+            '--model-id',
+            preset.id,
+            '--cache-dir',
+            this.msCache // FunASR 默认用 ModelScope 缓存
+        ];
+    } else {
+        const jobs = Math.max(2, Math.min(8, Math.floor((os.cpus()?.length || 4) / 2)) || 2);
+        args = [
+            scriptPath,
+            '--model-id',
+            preset.id,
+            '--repo-id',
+            repoId,
+            '--cache-dir',
+            this.cacheDir,
+            '--jobs',
+            String(jobs),
+            '--source',
+            source
+        ];
+    }
+
     console.log(`[ASR ModelManager] Starting download: modelId=${modelId}, source=${source}, repoId=${repoId}`);
     console.log(`[ASR ModelManager] Python path: ${pythonExecutable}`);
-    console.log(`[ASR ModelManager] Download script: ${DOWNLOAD_SCRIPT}`);
-
-    const jobs = Math.max(2, Math.min(8, Math.floor((os.cpus()?.length || 4) / 2)) || 2);
-    const args = [
-      DOWNLOAD_SCRIPT,
-      '--model-id',
-      preset.id,
-      '--repo-id',
-      repoId,
-      '--cache-dir',
-      this.cacheDir,
-      '--jobs',
-      String(jobs),
-      '--source',
-      source
-    ];
-
+    console.log(`[ASR ModelManager] Download script: ${scriptPath}`);
     console.log(`[ASR ModelManager] Spawn command: ${pythonExecutable} ${args.join(' ')}`);
 
     const hfHomeEnv = this.hfHome || process.env.HF_HOME;
@@ -588,6 +626,13 @@ export default class ASRModelManager extends EventEmitter {
       if (payload.totalBytes) {
         ctx.totalBytes = payload.totalBytes;
       }
+      if (payload.message) {
+        this.broadcast('asr-model-download-log', {
+          modelId: ctx.modelId,
+          repoId: ctx.repoId,
+          message: payload.message,
+        });
+      }
       if (payload.snapshotRelativePath) {
         ctx.snapshotPath = path.isAbsolute(payload.snapshotRelativePath)
           ? payload.snapshotRelativePath
@@ -605,6 +650,14 @@ export default class ASRModelManager extends EventEmitter {
           }
         }
       }
+      // 记录 downloads 目录的现有子目录，后续用于估算部分下载进度（HF 临时文件）
+      ctx.downloadsDir = path.join(this.cacheDir, 'downloads');
+      try {
+        const baselineEntries = safeReaddir(ctx.downloadsDir).filter((entry) => entry.isDirectory());
+        ctx.downloadsBaseDirs = new Set(baselineEntries.map((entry) => entry.name));
+      } catch {
+        ctx.downloadsBaseDirs = null;
+      }
       if (!ctx.timer) {
         ctx.timer = setInterval(() => this.emitProgress(ctx), 1000);
       }
@@ -613,6 +666,14 @@ export default class ASRModelManager extends EventEmitter {
         ctx.snapshotPath = payload.localDir;
       }
       this.emitProgress(ctx, true);
+    } else if (payload.event === 'warning') {
+      // 仅记录警告，避免在 HuggingFace 失败但可回退时直接报错
+      this.broadcast('asr-model-download-log', {
+        modelId: ctx.modelId,
+        repoId: ctx.repoId,
+        message: payload.message || 'download warning',
+        traceback: payload.traceback,
+      });
     } else if (payload.event === 'error') {
       this.broadcast('asr-model-download-error', {
         modelId: ctx.modelId,
@@ -628,10 +689,26 @@ export default class ASRModelManager extends EventEmitter {
   }
 
   emitProgress(ctx, force = false) {
-    if (!ctx.snapshotPath) {
+    // 若 snapshot 路径尚未确认，但 modelscope 目录已创建，尝试动态解析
+    if ((!ctx.snapshotPath || !fs.existsSync(ctx.snapshotPath)) && ctx.source === 'modelscope') {
+      const resolvedMsPath =
+        getModelScopeRepoPath(this.cacheDir, ctx.repoId) ||
+        getModelScopeRepoPath(this.msCache, ctx.repoId) ||
+        getModelScopeRepoPath(this.systemMsCache, ctx.repoId) ||
+        getModelScopeRepoPath(this.systemHfCache, ctx.repoId);
+      if (resolvedMsPath) {
+        ctx.snapshotPath = resolvedMsPath;
+      }
+    }
+
+    if (!ctx.snapshotPath && !ctx.downloadsDir) {
       return;
     }
-    const downloadedBytes = directorySize(ctx.snapshotPath);
+
+    const snapshotBytes = ctx.snapshotPath ? directorySize(ctx.snapshotPath) : 0;
+    // HF 下载时，临时文件位于 cacheDir/downloads/<uuid>，用于显示部分下载进度
+    const tempBytes = this.computeDownloadTempBytes(ctx);
+    const downloadedBytes = Math.max(snapshotBytes, tempBytes);
     const totalBytes = ctx.totalBytes || downloadedBytes;
     const now = Date.now();
     const elapsedMs = now - (ctx.lastTimestamp || now);
@@ -650,6 +727,28 @@ export default class ASRModelManager extends EventEmitter {
       clearInterval(ctx.timer);
       ctx.timer = null;
     }
+  }
+
+  computeDownloadTempBytes(ctx) {
+    if (!ctx.downloadsDir) {
+      return 0;
+    }
+    let total = 0;
+    const baseline = ctx.downloadsBaseDirs || new Set();
+    let entries = [];
+    try {
+      entries = safeReaddir(ctx.downloadsDir).filter((entry) => entry.isDirectory());
+    } catch {
+      entries = [];
+    }
+    for (const entry of entries) {
+      if (baseline.has(entry.name)) {
+        continue;
+      }
+      const dirPath = path.join(ctx.downloadsDir, entry.name);
+      total += directorySize(dirPath);
+    }
+    return total;
   }
 
   cancelDownload(modelId) {

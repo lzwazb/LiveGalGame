@@ -372,8 +372,8 @@ export default function ASRManager(BaseClass) {
       if (count === 0) {
         console.log('No ASR config found, creating default config...');
 
-        // Windows 默认使用 Faster-Whisper base，其它平台默认 FunASR
-        const defaultModelName = process.platform === 'win32' ? 'base' : 'funasr-paraformer';
+        // 默认使用 FunASR ONNX（跨平台统一）
+        const defaultModelName = 'funasr-paraformer';
         const defaultConfig = {
           model_name: defaultModelName,
           language: 'zh',

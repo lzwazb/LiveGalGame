@@ -125,7 +125,8 @@ def download_from_huggingface(args):
         emit("cancelled", modelId=args.model_id, message="Download cancelled by user")
         sys.exit(1)
     except Exception as exc:
-        emit("error", modelId=args.model_id, message=str(exc), traceback=traceback.format_exc())
+        # HuggingFace 下载失败时让上层处理回退，不在此处直接报错
+        emit("warning", modelId=args.model_id, message=str(exc), traceback=traceback.format_exc())
         sys.exit(1)
 
 

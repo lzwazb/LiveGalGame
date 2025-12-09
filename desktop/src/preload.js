@@ -149,6 +149,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('asr-model-download-started', listener);
     return () => ipcRenderer.removeListener('asr-model-download-started', listener);
   },
+  onAsrModelDownloadLog: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('asr-model-download-log', listener);
+    return () => ipcRenderer.removeListener('asr-model-download-log', listener);
+  },
   onAsrModelDownloadProgress: (callback) => {
     const listener = (event, payload) => callback(payload);
     ipcRenderer.on('asr-model-download-progress', listener);

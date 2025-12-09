@@ -44,6 +44,19 @@ function run(cmd, options = {}) {
   execSync(cmd, { stdio: 'inherit', ...options });
 }
 
+function runCapture(cmd, options = {}) {
+  try {
+    const output = execSync(cmd, { encoding: 'utf-8', ...options });
+    return { success: true, stdout: output, stderr: '' };
+  } catch (err) {
+    return { 
+      success: false, 
+      stdout: err.stdout?.toString() || '', 
+      stderr: err.stderr?.toString() || err.message || err.toString() 
+    };
+  }
+}
+
 function detectPython() {
   for (const cmd of candidateCmds) {
     try {
@@ -183,7 +196,65 @@ function installDeps() {
 
   // 全平台统一安装 requirements（默认使用 FunASR ONNX）
   console.log(`[prepare-python-env] install requirements (platform=${isWin ? 'win' : 'unix'})`);
-  run(`"${pythonPath}" -m pip install -r "${requirementsPath}"`, { env: envNoProxy });
+  
+  if (isWin) {
+    // Windows 上：先尝试正常安装，如果失败且是 av 相关错误，则跳过 av 继续安装
+    // funasr-onnx 不依赖 av，所以可以安全跳过
+    const result = runCapture(`"${pythonPath}" -m pip install -r "${requirementsPath}"`, { env: envNoProxy });
+    
+    if (!result.success) {
+      const errorOutput = result.stderr + result.stdout;
+      // 检查是否是 av 相关的编译错误
+      if (errorOutput.includes('av') && (errorOutput.includes('LNK1181') || errorOutput.includes('Failed building wheel') || errorOutput.includes('failed-wheel-build'))) {
+        console.warn('[prepare-python-env] av package build failed (expected on Windows), trying alternative installation...');
+        
+        // 尝试使用 --only-binary 安装，跳过需要编译的包
+        const binaryResult = runCapture(`"${pythonPath}" -m pip install -r "${requirementsPath}" --only-binary=:all:`, { env: envNoProxy });
+        
+        if (!binaryResult.success) {
+          // 如果 --only-binary 也失败，逐个安装关键包（跳过可能有问题的传递依赖）
+          console.warn('[prepare-python-env] --only-binary failed, installing critical packages individually...');
+          const criticalPkgs = [
+            'torch==2.2.2',
+            'torchaudio==2.2.2',
+            'funasr-onnx==0.4.1',
+            'onnxruntime==1.21.1',
+            'faster-whisper==0.10.0',
+            'fastapi>=0.115.0',
+            'uvicorn[standard]>=0.30.0',
+            'websockets>=12.0',
+            'pyinstaller>=6.3.0',
+            'python-multipart>=0.0.9',
+            'soundfile>=0.12.1',
+            'numpy>=1.26.4,<2',
+            'requests[socks]>=2.31.0',
+            'httpx[socks]>=0.27.0',
+            'transformers>=4.38.0',
+            'optimum[onnxruntime]>=1.21.0',
+          ];
+          
+          let allSuccess = true;
+          for (const pkg of criticalPkgs) {
+            const pkgResult = runCapture(`"${pythonPath}" -m pip install "${pkg}"`, { env: envNoProxy });
+            if (!pkgResult.success) {
+              console.warn(`[prepare-python-env] Failed to install ${pkg}: ${pkgResult.stderr.substring(0, 200)}`);
+              allSuccess = false;
+            }
+          }
+          
+          if (!allSuccess) {
+            console.warn('[prepare-python-env] Some packages failed to install, but continuing...');
+          }
+        }
+      } else {
+        // 其他错误，直接抛出
+        console.error('[prepare-python-env] Installation failed:', result.stderr);
+        throw new Error(`pip install failed: ${result.stderr.substring(0, 500)}`);
+      }
+    }
+  } else {
+    run(`"${pythonPath}" -m pip install -r "${requirementsPath}"`, { env: envNoProxy });
+  }
 }
 
 function ensureCondaPackInstalled(miniforgePython) {

@@ -17,9 +17,10 @@ export function ASRModelCard({
   const activeDownload = Boolean(status.activeDownload);
   const isActive = isPresetActive(preset, activeModelId);
   const updatedAt = status.updatedAt ? new Date(status.updatedAt).toLocaleString() : null;
-  const progressVisible = totalBytes > 0 && (activeDownload || (downloadedBytes > 0 && !isDownloaded));
+  const progressVisible = (totalBytes > 0 && (activeDownload || (downloadedBytes > 0 && !isDownloaded))) || (activeDownload && status.progressMessage);
   const engine = preset.engine || 'faster-whisper';
   const canResume = !isDownloaded && downloadedBytes > 0 && !activeDownload;
+  const progressMessage = status.progressMessage;
 
   return (
     <div
@@ -72,25 +73,34 @@ export function ASRModelCard({
           </div>
         ) : (
           <div className="text-gray-500">
-            {activeDownload ? '正在下载模型...' : '尚未下载，点击下方按钮开始下载'}
+            {activeDownload ? (progressMessage || '正在下载模型...') : '尚未下载，点击下方按钮开始下载'}
           </div>
         )}
       </div>
 
       {progressVisible && (
         <div className="mt-3">
-          <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
-            <div
-              className={`h-full rounded-full ${isDownloaded ? 'bg-green-500' : 'bg-blue-500'}`}
-              style={{ width: `${percent}%` }}
-            />
-          </div>
-          <div className="mt-1 flex items-center justify-between text-xs text-gray-600">
-            <span>
-              {formatBytes(downloadedBytes)} / {formatBytes(totalBytes)} ({percent}%)
-            </span>
-            <span>速度：{formatSpeed(status.bytesPerSecond)}</span>
-          </div>
+          {totalBytes > 0 && percent > 0 ? (
+            <>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                <div
+                  className={`h-full rounded-full ${isDownloaded ? 'bg-green-500' : 'bg-blue-500'}`}
+                  style={{ width: `${percent}%` }}
+                />
+              </div>
+              <div className="mt-1 flex items-center justify-between text-xs text-gray-600">
+                <span>
+                  {formatBytes(downloadedBytes)} / {formatBytes(totalBytes)} ({percent}%)
+                </span>
+                <span>速度：{formatSpeed(status.bytesPerSecond)}</span>
+              </div>
+            </>
+          ) : (
+            <div className="text-xs text-gray-500 animate-pulse flex items-center gap-2">
+               <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
+               {progressMessage || '正在准备下载...'}
+            </div>
+          )}
         </div>
       )}
 

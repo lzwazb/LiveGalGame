@@ -69,6 +69,33 @@ SENTENCE_END_PUNCTUATION = set("。！？!?.；;")
 MIN_SENTENCE_CHARS = int(os.environ.get("MIN_SENTENCE_CHARS", "2"))
 
 
+def smart_concat(history: str, new_text: str) -> str:
+    """
+    智能拼接流式文本：处理增量、全量、重叠等情况。
+    """
+    if not new_text:
+        return history
+    if not history:
+        return new_text
+    
+    # 1. 检查 new_text 是否完全包含 history (说明 new_text 是全量更新)
+    if new_text.startswith(history):
+        return new_text
+        
+    # 2. 检查 history 是否完全包含 new_text (说明 new_text 是旧的全量或者是重复输出)
+    if history.endswith(new_text):
+        return history
+        
+    # 3. 检查重叠 (history后缀 与 new_text前缀)
+    overlap_len = min(len(history), len(new_text))
+    for i in range(overlap_len, 0, -1):
+        if history.endswith(new_text[:i]):
+            return history + new_text[i:]
+            
+    # 4. 无重叠，直接拼接
+    return history + new_text
+
+
 def decode_audio_chunk(audio_b64: str) -> np.ndarray:
     """Base64 音频转 float32 numpy array（范围 -1~1）。"""
     audio_bytes = base64.b64decode(audio_b64)
@@ -159,6 +186,8 @@ def load_funasr_onnx_models():
     
     支持的环境变量:
     - ASR_MODEL: 模型 ID (funasr-paraformer / funasr-paraformer-large)
+        * funasr-paraformer: INT8 量化版，包体约 0.76GB（online/offline/punc/vad），速度更快
+        * funasr-paraformer-large: FP32 未量化，约 2.1GB（按 INT8→FP32 体积估算），精度更高
     - ASR_QUANTIZE: 是否使用量化 (true/false)，默认根据模型类型自动选择
     """
     try:
@@ -189,6 +218,7 @@ def load_funasr_onnx_models():
     sys.stderr.write(f"[FunASR Worker] Model ID: {model_id}\n")
     sys.stderr.write(f"[FunASR Worker] Is Large model: {is_large}\n")
     sys.stderr.write(f"[FunASR Worker] Use Quantize: {use_quantize}\n")
+    sys.stderr.write(f"[FunASR Worker] Preset size hint: {'~0.76GB INT8 (default)' if use_quantize else '~2.1GB FP32 (higher accuracy)'}\n")
     sys.stderr.write("[FunASR Worker] Loading ONNX models (first run will download)...\n")
     sys.stderr.flush()
 
@@ -356,22 +386,26 @@ def handle_streaming_chunk(
                 sys.stderr.write(f"[FunASR Worker] DEBUG extracted text=\"{text[:50]}...\"\n")
                 sys.stderr.flush()
                 
-                if text and text != state.last_sent_text:
-                    state.streaming_text = text
-                    send_ipc_message({
-                        "request_id": request_id,
-                        "session_id": session_id,
-                        "type": "partial",
-                        "text": text,
-                        "full_text": text,
-                        "timestamp": timestamp_ms,
-                        "is_final": False,
-                        "status": "success",
-                        "language": "zh",
-                    })
-                    state.last_sent_text = text
-                    sys.stderr.write(f"[FunASR Worker] 📝 PARTIAL: \"{text[:50]}...\"\n")
-                    sys.stderr.flush()
+                if text:
+                    # 使用智能拼接更新 streaming_text，解决流式输出不连续问题
+                    new_streaming = smart_concat(state.streaming_text, text)
+                    
+                    if new_streaming != state.streaming_text:
+                        state.streaming_text = new_streaming
+                        send_ipc_message({
+                            "request_id": request_id,
+                            "session_id": session_id,
+                            "type": "partial",
+                            "text": state.streaming_text,
+                            "full_text": state.streaming_text,
+                            "timestamp": timestamp_ms,
+                            "is_final": False,
+                            "status": "success",
+                            "language": "zh",
+                        })
+                        state.last_sent_text = text
+                        sys.stderr.write(f"[FunASR Worker] 📝 PARTIAL: \"{state.streaming_text[-50:]}...\"\n")
+                        sys.stderr.flush()
         except Exception as e:
             sys.stderr.write(f"[FunASR Worker] Pass 1 error: {e}\n")
             sys.stderr.flush()

@@ -99,6 +99,25 @@ function ASRSettings() {
               bytesPerSecond: payload.bytesPerSecond ?? previous.bytesPerSecond ?? 0,
               activeDownload: true,
               isDownloaded: false,
+              // 如果 progress 事件里带了 message，也更新
+              progressMessage: payload.message || previous.progressMessage,
+            },
+          };
+        });
+      }));
+    }
+
+    if (api.onAsrModelDownloadLog) {
+      cleanups.push(api.onAsrModelDownloadLog((payload) => {
+        setModelStatuses((prev) => {
+          const previous = prev[payload.modelId] || { modelId: payload.modelId };
+          return {
+            ...prev,
+            [payload.modelId]: {
+              ...previous,
+              modelId: payload.modelId,
+              progressMessage: payload.message,
+              activeDownload: true,
             },
           };
         });
