@@ -69,6 +69,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteConversation: (conversationId) => ipcRenderer.invoke('db-delete-conversation', conversationId),
   deleteCharacter: (characterId) => ipcRenderer.invoke('db-delete-character', characterId),
 
+  // Review API
+  getConversationById: (conversationId) => ipcRenderer.invoke('db-get-conversation-by-id', conversationId),
+  getConversationReview: (conversationId) => ipcRenderer.invoke('review:get', conversationId),
+  generateConversationReview: (conversationId, options = {}) =>
+    ipcRenderer.invoke('review:generate', { conversationId, ...options }),
+
   // LLM配置API
   saveLLMConfig: (configData) => ipcRenderer.invoke('llm-save-config', configData),
   getAllLLMConfigs: () => ipcRenderer.invoke('llm-get-all-configs'),

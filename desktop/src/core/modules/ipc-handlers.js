@@ -3,11 +3,13 @@ import DatabaseManager from '../../db/database.js';
 import ASRManager from '../../asr/asr-manager.js';
 import ASRModelManager from '../../asr/model-manager.js';
 import LLMSuggestionService from './llm-suggestion-service.js';
+import ReviewService from './review-service.js';
 import MemoryService from './memory-service.js';
 import { registerWindowHandlers } from './ipc-handlers/window-handlers.js';
 import { registerDatabaseHandlers } from './ipc-handlers/database-handlers.js';
 import { registerLLMHandlers } from './ipc-handlers/llm-handlers.js';
 import { registerSuggestionHandlers } from './ipc-handlers/suggestion-handlers.js';
+import { registerReviewHandlers } from './ipc-handlers/review-handlers.js';
 import { registerMemoryHandlers } from './ipc-handlers/memory-handlers.js';
 import { registerASRModelHandlers } from './ipc-handlers/asr-model-handlers.js';
 import { registerASRAudioHandlers } from './ipc-handlers/asr-audio-handlers.js';
@@ -23,6 +25,7 @@ export class IPCManager {
     this.modelManager = null;
     this.asrManager = null;
     this.llmSuggestionService = null;
+    this.reviewService = null;
     this.memoryService = null;
     this.asrModelPreloading = false;
     this.asrModelPreloaded = false;
@@ -78,6 +81,14 @@ export class IPCManager {
       this.memoryService = new MemoryService();
     }
   }
+  /**
+   * 初始化 Review Service
+   */
+  initReviewService() {
+    if (!this.reviewService) {
+      this.reviewService = new ReviewService(() => this.db);
+    }
+  }
 
   /**
    * 注册所有 IPC 处理器
@@ -88,17 +99,28 @@ export class IPCManager {
     this.initDatabase();
     this.initModelManager();
     this.initLLMSuggestionService();
+    this.initReviewService();
     this.initMemoryService();
     this.setupWindowHandlers();
     this.setupDatabaseHandlers();
     this.setupLLMHandlers();
     this.setupSuggestionHandlers();
+    this.setupReviewHandlers();
     this.setupMemoryHandlers();
     this.setupASRModelHandlers();
     this.setupASRAudioHandlers();
     this.setupMediaHandlers();
 
     console.log('[IPCHandlers] All IPC handlers registered successfully');
+  }
+
+  /**
+   * 设置复盘相关 IPC 处理器
+   */
+  setupReviewHandlers() {
+    registerReviewHandlers({
+      reviewService: this.reviewService
+    });
   }
 
   /**

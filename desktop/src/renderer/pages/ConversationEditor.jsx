@@ -1,5 +1,7 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
+import ReviewSection from '../components/review/ReviewSection.jsx';
+import { useConversationReview } from '../hooks/useConversationReview.js';
 
 function ConversationEditor() {
   const [searchParams] = useSearchParams();
@@ -11,6 +13,45 @@ function ConversationEditor() {
   const [aiLoading, setAiLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [insightPanelVisible, setInsightPanelVisible] = useState(true);
+
+  // Resize logic
+  const [sidebarWidth, setSidebarWidth] = useState(224);
+  const sidebarRef = useRef(null);
+  const isResizingRef = useRef(false);
+
+  // Review logic
+  const { review } = useConversationReview(selectedConversation);
+
+  const startResizing = useCallback(() => {
+    isResizingRef.current = true;
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, []);
+
+  const handleMouseMove = useCallback((e) => {
+    if (!isResizingRef.current) return;
+    const newWidth = e.clientX;
+    if (newWidth > 150 && newWidth < 600) {
+      setSidebarWidth(newWidth);
+    }
+  }, []);
+
+  const handleMouseUp = useCallback(() => {
+    isResizingRef.current = false;
+    document.removeEventListener('mousemove', handleMouseMove);
+    document.removeEventListener('mouseup', handleMouseUp);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }, [handleMouseMove]);
+
+  useEffect(() => {
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [handleMouseMove, handleMouseUp]);
 
   useEffect(() => {
     loadConversations();
@@ -127,7 +168,10 @@ function ConversationEditor() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-background-light dark:bg-background-dark text-text-light dark:text-text-dark">
-      <aside className="w-56 flex-shrink-0 border-r border-surface-light dark:border-surface-dark/40">
+      <aside
+        className="flex-shrink-0 border-r border-surface-light dark:border-surface-dark/40 relative group"
+        style={{ width: sidebarWidth }}
+      >
         <div className="flex h-full flex-col justify-between p-4 overflow-hidden">
           <div className="flex flex-col gap-4 flex-1 min-h-0">
             <div className="flex items-center gap-3 px-2">
@@ -173,11 +217,10 @@ function ConversationEditor() {
                   <div
                     key={conv.id}
                     onClick={() => selectConversation(conv.id)}
-                    className={`p-3 rounded-lg cursor-pointer transition-colors ${
-                      selectedConversation === conv.id
-                        ? 'bg-surface-light dark:bg-surface-dark'
-                        : 'hover:bg-surface-light dark:hover:bg-surface-dark'
-                    }`}
+                    className={`p-3 rounded-lg cursor-pointer transition-colors ${selectedConversation === conv.id
+                      ? 'bg-surface-light dark:bg-surface-dark'
+                      : 'hover:bg-surface-light dark:hover:bg-surface-dark'
+                      }`}
                   >
                     <div className="flex items-start justify-between mb-2">
                       <div className="flex items-center gap-3">
@@ -215,6 +258,11 @@ function ConversationEditor() {
             </div>
           </div>
         </div>
+        {/* Resizer Handle */}
+        <div
+          className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-primary/50 active:bg-primary transition-colors z-10"
+          onMouseDown={startResizing}
+        />
       </aside>
 
       <main className="flex-1 flex flex-col overflow-hidden p-8">
@@ -244,8 +292,10 @@ function ConversationEditor() {
         <div className="flex-1 min-h-0 overflow-y-auto space-y-6">
           <AIAnalysisPanel aiData={aiData} loading={aiLoading} />
           <KeyMomentsSection moments={aiData?.keyMoments} />
-          <AttitudeAnalysisSection attitude={aiData?.attitudeAnalysis} />
-          <ActionSuggestionsSection suggestions={aiData?.actionSuggestions} />
+          <AttitudeAnalysisSection attitude={aiData?.attitudeAnalysis} review={review} />
+          <ReviewSection conversationId={selectedConversation} />
+          {/* Action Suggestions Hidden as requested */}
+          {/* <ActionSuggestionsSection suggestions={aiData?.actionSuggestions} /> */}
 
           {selectedConversation ? (
             <div className="mt-6 max-w-5xl mx-auto">
@@ -262,11 +312,10 @@ function ConversationEditor() {
                       />
                     )}
                     <div
-                      className={`rounded-2xl px-4 py-3 max-w-[80%] ${
-                        msg.sender === 'user'
-                          ? 'bg-primary text-white rounded-br-md'
-                          : 'bg-surface-light dark:bg-surface-dark text-text-light dark:text-text-muted-dark rounded-bl-md'
-                      }`}
+                      className={`rounded-2xl px-4 py-3 max-w-[80%] ${msg.sender === 'user'
+                        ? 'bg-primary text-white rounded-br-md'
+                        : 'bg-surface-light dark:bg-surface-dark text-text-light dark:text-text-muted-dark rounded-bl-md'
+                        }`}
                       style={{
                         borderColor: msg.sender === 'user' ? 'transparent' : conversationColor,
                         borderWidth: msg.sender === 'user' ? 0 : 1,
@@ -298,9 +347,8 @@ function ConversationEditor() {
       </main>
 
       <aside
-        className={`flex flex-shrink-0 flex-col border-l border-surface-light dark:border-surface-dark/40 bg-background-light dark:bg-background-dark transition-[width] duration-200 ${
-          insightPanelVisible ? 'w-48' : 'w-14'
-        }`}
+        className={`flex flex-shrink-0 flex-col border-l border-surface-light dark:border-surface-dark/40 bg-background-light dark:bg-background-dark transition-[width] duration-200 ${insightPanelVisible ? 'w-48' : 'w-14'
+          }`}
       >
         <div className="flex items-center justify-between px-4 py-4">
           {insightPanelVisible ? (
@@ -430,10 +478,13 @@ function KeyMomentsSection({ moments }) {
   );
 }
 
-function AttitudeAnalysisSection({ attitude }) {
+function AttitudeAnalysisSection({ attitude, review }) {
   if (!attitude) return null;
 
-  const affinityText = attitude.affinityChange >= 0 ? `+${attitude.affinityChange}` : attitude.affinityChange;
+  // Show affinity change only if review exists (post-game analysis)
+  const showAffinity = !!review;
+  const affinityChange = review?.summary?.total_affinity_change ?? attitude.affinityChange;
+  const affinityText = affinityChange >= 0 ? `+${affinityChange}` : affinityChange;
 
   return (
     <div className="rounded-2xl border border-border-light bg-surface-light p-4 shadow-sm dark:border-border-dark dark:bg-surface-dark">
@@ -447,9 +498,11 @@ function AttitudeAnalysisSection({ attitude }) {
         </span>
       </div>
       <p className="text-sm text-text-muted-light dark:text-text-muted-dark mb-2">{attitude.description}</p>
-      <div className="text-sm font-semibold text-text-light dark:text-text-dark">
-        好感度变化：{affinityText} 点
-      </div>
+      {showAffinity && (
+        <div className="text-sm font-semibold text-text-light dark:text-text-dark">
+          好感度变化：{affinityText} 点
+        </div>
+      )}
     </div>
   );
 }

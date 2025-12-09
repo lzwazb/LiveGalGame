@@ -190,3 +190,13 @@ CREATE INDEX IF NOT EXISTS idx_speech_records_source_id ON speech_recognition_re
 CREATE INDEX IF NOT EXISTS idx_speech_records_status ON speech_recognition_records(status);
 CREATE INDEX IF NOT EXISTS idx_speech_records_created_at ON speech_recognition_records(created_at);
 CREATE INDEX IF NOT EXISTS idx_asr_configs_is_default ON asr_configs(is_default);
+
+-- 剧情复盘表
+CREATE TABLE IF NOT EXISTS conversation_reviews (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  review_data TEXT NOT NULL,  -- TOON 格式解析后存为 JSON
+  created_at INTEGER NOT NULL,
+  model_used TEXT,
+  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);

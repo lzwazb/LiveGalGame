@@ -127,6 +127,15 @@ export function registerDatabaseHandlers({ db }) {
     }
   });
 
+  ipcMain.handle('db-get-conversation-by-id', (event, conversationId) => {
+    try {
+      return db.getConversationById(conversationId);
+    } catch (error) {
+      console.error('Error getting conversation by id:', error);
+      return null;
+    }
+  });
+
   ipcMain.handle('db-update-message', (event, messageId, updates) => {
     try {
       return db.updateMessage(messageId, updates);

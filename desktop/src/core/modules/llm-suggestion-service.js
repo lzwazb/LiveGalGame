@@ -159,6 +159,14 @@ export default class LLMSuggestionService {
     let totalContentLength = 0;
     let rawStreamContent = '';
 
+    // 记录批次时间戳，同一批次的所有建议使用相同的时间戳
+    const batchTimestamp = Date.now();
+
+    // 获取最新的消息ID（用于关联suggestion）
+    const latestMessageId = context.history && context.history.length > 0 
+      ? context.history[context.history.length - 1]?.id || null
+      : null;
+
     console.log('[LLMSuggestionService] Creating TOON parser');
     const parser = createToonSuggestionStreamParser({
       onHeader: (header) => {
@@ -174,10 +182,22 @@ export default class LLMSuggestionService {
       onSuggestion: (item) => {
         console.log(`[LLMSuggestionService] Parser received suggestion #${emittedCount + 1}:`, item);
         const suggestionIndex = emittedCount;
-        const suggestion = this.decorateSuggestion(item, emittedCount, { trigger, reason });
+        const suggestion = this.decorateSuggestion(item, emittedCount, { trigger, reason }, batchTimestamp);
         suggestion.index = suggestionIndex;
         console.log(`[LLMSuggestionService] Decorated suggestion:`, suggestion);
         emittedCount += 1;
+        
+        // 保存suggestion到数据库
+        if (conversationId && this.db.saveActionSuggestion) {
+          try {
+            this.db.saveActionSuggestion(suggestion, conversationId, latestMessageId);
+            console.log(`[LLMSuggestionService] Saved suggestion to database: ${suggestion.id}`);
+          } catch (error) {
+            console.error('[LLMSuggestionService] Failed to save suggestion to database:', error);
+            // 不阻断流程，继续执行
+          }
+        }
+        
         handlers.onSuggestion?.(suggestion);
       },
       onError: (error) => {
@@ -406,8 +426,11 @@ export default class LLMSuggestionService {
     }
   }
 
-  decorateSuggestion(item, index, { trigger, reason }) {
-    const suggestionId = `llm-suggestion-${Date.now()}-${index}`;
+  decorateSuggestion(item, index, { trigger, reason }, batchTimestamp = null) {
+    // 使用批次时间戳，确保同一批次的所有建议使用相同的时间戳
+    // 如果没有提供批次时间戳，则使用当前时间（向后兼容）
+    const timestamp = batchTimestamp || Date.now();
+    const suggestionId = `llm-suggestion-${timestamp}-${index}`;
     const tags = Array.isArray(item.tags)
       ? item.tags.slice(0, 3)
       : typeof item.tags === 'string'
@@ -421,7 +444,8 @@ export default class LLMSuggestionService {
       tags,
       // affinity_hint: item.affinity_hint || null,
       trigger,
-      reason
+      reason,
+      created_at: timestamp // 使用批次时间戳，确保同一批次的所有建议使用相同的时间戳
     };
   }
 

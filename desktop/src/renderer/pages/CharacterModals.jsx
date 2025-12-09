@@ -10,6 +10,8 @@ export function AddCharacterModal({ onClose, onSaved }) {
     notes: ''
   });
   const [loading, setLoading] = useState(false);
+  const labelClass = 'block text-sm font-medium text-[#f4dce6] mb-2';
+  const accentTextClass = 'text-sm font-medium text-[#f4dce6]';
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -42,7 +44,7 @@ export function AddCharacterModal({ onClose, onSaved }) {
     <ModalWrapper onClose={onClose} title="添加新角色">
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
-          <label className="block text-sm font-medium text-text-light dark:text-text-dark mb-2">
+          <label className={labelClass}>
             角色名称 *
           </label>
           <input
@@ -56,7 +58,7 @@ export function AddCharacterModal({ onClose, onSaved }) {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-text-light dark:text-text-dark mb-2">
+          <label className={labelClass}>
             昵称
           </label>
           <input
@@ -69,7 +71,7 @@ export function AddCharacterModal({ onClose, onSaved }) {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-text-light dark:text-text-dark mb-2">
+          <label className={labelClass}>
             关系标签
           </label>
           <input
@@ -82,7 +84,7 @@ export function AddCharacterModal({ onClose, onSaved }) {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-text-light dark:text-text-dark mb-2">
+          <label className={labelClass}>
             初始好感度
           </label>
           <div className="flex items-center gap-3">
@@ -94,12 +96,12 @@ export function AddCharacterModal({ onClose, onSaved }) {
               onChange={(e) => setFormData({ ...formData, affinity: parseInt(e.target.value) })}
               className="flex-1"
             />
-            <span className="text-sm font-medium">{formData.affinity}%</span>
+            <span className={accentTextClass}>{formData.affinity}%</span>
           </div>
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-text-light dark:text-text-dark mb-2">
+          <label className={labelClass}>
             备注
           </label>
           <textarea

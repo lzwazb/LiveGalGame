@@ -57,6 +57,51 @@ export default function AIAnalysisManager(BaseClass) {
     }
   }
 
+  // 保存行动建议到数据库
+  saveActionSuggestion(suggestion, conversationId, messageId = null) {
+    try {
+      if (!suggestion || !conversationId) {
+        console.warn('[DB] saveActionSuggestion: Missing required fields', { suggestion, conversationId });
+        return null;
+      }
+
+      const stmt = this.db.prepare(`
+        INSERT INTO ai_suggestions (
+          id, conversation_id, message_id, title, content, 
+          affinity_prediction, tags, is_used, created_at
+        ) VALUES (
+          @id, @conversation_id, @message_id, @title, @content,
+          @affinity_prediction, @tags, @is_used, @created_at
+        )
+      `);
+
+      const tagsStr = Array.isArray(suggestion.tags) 
+        ? suggestion.tags.join(',') 
+        : (suggestion.tags || '');
+
+      const now = Date.now();
+      const suggestionId = suggestion.id || `suggestion-${now}-${Math.random().toString(36).substr(2, 9)}`;
+
+      stmt.run({
+        id: suggestionId,
+        conversation_id: conversationId,
+        message_id: messageId,
+        title: suggestion.title || suggestion.content || '未命名建议',
+        content: suggestion.content || suggestion.title || '',
+        affinity_prediction: suggestion.affinity_prediction || null,
+        tags: tagsStr,
+        is_used: suggestion.is_used || 0,
+        created_at: suggestion.created_at || now
+      });
+
+      console.log(`[DB] Saved action suggestion: ${suggestionId} for conversation: ${conversationId}`);
+      return suggestionId;
+    } catch (error) {
+      console.error('Error saving action suggestion:', error);
+      return null;
+    }
+  }
+
   // 获取对话的完整AI分析数据
   getConversationAIData(conversationId) {
     console.log(`[DB] Getting AI data for conversation: ${conversationId}`);
