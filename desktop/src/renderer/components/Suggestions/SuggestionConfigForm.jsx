@@ -42,7 +42,17 @@ export const SuggestionConfigForm = ({
         </label>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      {form.enable_passive_suggestion === false && (
+        <div className="text-sm text-text-muted-light dark:text-text-muted-dark">
+          开启“被动推荐”后可配置详细触发策略和窗口。
+        </div>
+      )}
+
+      <div
+        className={`grid gap-4 md:grid-cols-2 ${
+          form.enable_passive_suggestion ? '' : 'opacity-50 pointer-events-none select-none'
+        }`}
+      >
         <div>
           <label className="block text-sm font-medium text-text-light dark:text-text-dark mb-1">
             每次生成选项数量
@@ -89,6 +99,9 @@ export const SuggestionConfigForm = ({
             onChange={onNumberChange('silence_threshold_seconds')}
             className="w-full px-3 py-2 border border-border-light dark:border-border-dark rounded-lg bg-surface-light dark:bg-surface-dark text-text-light dark:text-text-dark focus:outline-none focus:ring-2 focus:ring-primary/50"
           />
+          <p className="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">
+            角色发言后等待多久仍未收到用户回复就自动给出建议，避免冷场。
+          </p>
         </div>
 
         <div>
@@ -103,6 +116,9 @@ export const SuggestionConfigForm = ({
             onChange={onNumberChange('message_threshold_count')}
             className="w-full px-3 py-2 border border-border-light dark:border-border-dark rounded-lg bg-surface-light dark:bg-surface-dark text-text-light dark:text-text-dark focus:outline-none focus:ring-2 focus:ring-primary/50"
           />
+          <p className="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">
+            连续收到角色多少条消息立刻触发，防止角色连讲用户无回应。
+          </p>
         </div>
 
         <div>
@@ -119,47 +135,6 @@ export const SuggestionConfigForm = ({
           />
           <p className="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">
             防止建议过于频繁的等待时间。达到触发条件后，需等待此时间才会再次生成建议。
-          </p>
-        </div>
-      </div>
-
-      <div className="p-4 rounded-lg border border-border-light dark:border-border-dark flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="font-medium text-text-light dark:text-text-dark">场景判断 LLM（situation_llm）</p>
-          <p className="text-sm text-text-muted-light dark:text-text-muted-dark">
-            将实时对话片段交给专用模型，判断是否需要唤起选项生成；比通用模型更便宜、更快。
-          </p>
-        </div>
-        <label className="inline-flex items-center gap-2 cursor-pointer">
-          <span className="text-sm text-text-muted-light dark:text-text-muted-dark">
-            {form.situation_llm_enabled ? '已启用' : '已关闭'}
-          </span>
-          <input
-            type="checkbox"
-            checked={form.situation_llm_enabled}
-            onChange={(e) => {
-              onUpdateField('situation_llm_enabled', e.target.checked);
-              onUpdateField('topic_detection_enabled', e.target.checked);
-            }}
-            className="w-5 h-5 text-primary border-border-light dark:border-border-dark rounded focus:ring-primary"
-          />
-        </label>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        <div>
-          <label className="block text-sm font-medium text-text-light dark:text-text-dark mb-1">
-            场景判断模型名称
-          </label>
-          <input
-            type="text"
-            value={form.situation_model_name || ''}
-            onChange={(e) => onUpdateField('situation_model_name', e.target.value)}
-            placeholder="gpt-4o-mini"
-            className="w-full px-3 py-2 border border-border-light dark:border-border-dark rounded-lg bg-surface-light dark:bg-surface-dark text-text-light dark:text-text-dark focus:outline-none focus:ring-2 focus:ring-primary/50"
-          />
-          <p className="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">
-            仅用于判定“是否需要生成选项”，默认沿用全局模型；可填廉价/快速的模型名。
           </p>
         </div>
       </div>

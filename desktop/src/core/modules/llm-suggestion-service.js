@@ -410,14 +410,120 @@ export default class LLMSuggestionService {
     return Math.min(1, Math.max(0, value));
   }
 
-  buildSituationPrompt(context, heuristicResult) {
+  parseBoolean(value) {
+    const text = String(value ?? '').trim().toLowerCase();
+    if (!text) return false;
+    return ['true', '1', 'yes', 'y', '是', '需要', '要', '是的'].includes(text);
+  }
+
+  csvSplit(line) {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i += 1) {
+      const char = line[i];
+      if (char === '"' && line[i - 1] !== '\\') {
+        inQuotes = !inQuotes;
+        continue;
+      }
+      if ((char === ',' || char === '，') && !inQuotes) {
+        result.push(current);
+        current = '';
+        continue;
+      }
+      current += char;
+    }
+    if (current !== '' || line.endsWith(',') || line.endsWith('，')) {
+      result.push(current);
+    }
+    return result;
+  }
+
+  parseSituationToon(text = '') {
+    if (!text) return null;
+    const lines = text
+      .split('\n')
+      .map((line) => line.trim().replace(/^```toon\b/i, '').replace(/```$/i, ''))
+      .filter(Boolean);
+
+    let headerIndex = -1;
+    let fields = [];
+    const headerRegex = /^situation\[(\d+)\]\{([^}]+)\}:\s*$/i;
+    for (let i = 0; i < lines.length; i += 1) {
+      const match = lines[i].match(headerRegex);
+      if (match) {
+        headerIndex = i;
+        fields = match[2]
+          .split(',')
+          .map((f) => f.trim())
+          .filter(Boolean);
+        break;
+      }
+    }
+
+    if (headerIndex === -1 || !fields.length) {
+      console.warn('[SituationToonParser] Header not found or fields empty', { text });
+      return null;
+    }
+
+    const dataLine = lines.slice(headerIndex + 1).find((line) => line && !/^```/.test(line));
+    if (!dataLine) {
+      console.warn('[SituationToonParser] No data line found after header');
+      return null;
+    }
+
+    const values = this.csvSplit(dataLine);
+    const result = {};
+    fields.forEach((field, idx) => {
+      result[field] = values[idx] !== undefined ? values[idx].trim() : '';
+    });
+    return result;
+  }
+
+  buildSituationPrompt(context, heuristicResult, signals = {}) {
+    const silenceSeconds = signals.silenceSeconds != null ? Math.min(signals.silenceSeconds, 60) : null;
+    const roleBurstCount = signals.roleBurstCount != null ? Math.min(signals.roleBurstCount, 8) : null;
+    const triggerHint = signals.triggerHint || 'auto';
+    const signalLines = [];
+    if (silenceSeconds != null) {
+      signalLines.push(`【冷场时长】约 ${silenceSeconds.toFixed(1)} 秒（已封顶 60 秒）`);
+    }
+    if (roleBurstCount != null) {
+      signalLines.push(`【连续角色消息】${roleBurstCount} 条（已封顶 8 条）`);
+    }
+    signalLines.push(`【触发来源提示】${triggerHint}`);
+
     return [
-      '你是 situation_llm，负责快速判定当前对话是否需要立即生成回复选项。',
-      '请只输出 JSON：{"should_intervene":true/false,"need_options":true/false,"trigger":"question|invite|message_burst|other","reason":"简短中文","confidence":0-1}',
-      '规则：提出问题/邀约/安排/确认/期待 → need_options=true；纯闲聊无决策点 → false；不确定时倾向 false。',
+      '# Role',
+      '你是恋爱对话的“交互时机决策系统”，唯一任务是判断此刻是否需要立刻向玩家推送“回复建议”。',
+      '',
+      '# Task',
+      '分析【角色信息】【对话历史】【实时信号】，在“需要帮助/推进”时果断介入，在“无关紧要/自然流”时保持安静。',
+      '',
+      '# Decision Logic',
+      '1) need_options=true：',
+      '   - 关键交互：角色提问/邀约/二选一/期待表态。',
+      '   - 打破冷场：冷场时间较长（参考信号）。',
+      '   - 切入对话：连续角色消息较多（参考信号），需要给玩家回复选项。',
+      '2) need_options=false：',
+      '   - 仅日常陈述、感叹，无明确期待；对话流畅无需辅助。',
+      '',
+      '# Output (Strict TOON)',
+      '只输出一行 TOON 表格，禁止 JSON/代码块/解释。',
+      '表头：situation[1]{need_options,trigger,reason,confidence}:',
+      '字段：',
+      '- need_options: true/false (是否介入)',
+      '- trigger: question | invite | message_burst | silence | other',
+      '- reason: 简短中文决策理由，如“角色提问等待回答”“冷场超10秒需破冰”',
+      '- confidence: 0.0-1.0',
+      '',
+      '# Context Data',
       `【角色信息】${context.characterProfile}`,
       '【对话历史】',
-      context.historyText
+      context.historyText,
+      ...signalLines,
+      '',
+      '请直接输出上述 TOON 表格，不要添加任何其他文本。'
     ].join('\n');
   }
 
@@ -435,6 +541,16 @@ export default class LLMSuggestionService {
       messageLimit: Math.min(messageLimit, 8)
     });
 
+    const silenceSeconds = Math.min(
+      Math.max(Number(payload.silence_seconds ?? 0) || 0, 0),
+      60
+    );
+    const roleBurstCount = Math.min(
+      Math.max(Number(payload.role_burst_count ?? 0) || 0, 0),
+      8
+    );
+    const triggerHint = payload.trigger_hint || 'auto';
+
     const history = context.history || [];
     if (!history.length) {
       return { shouldSuggest: false, shouldIntervene: false, reason: 'no_history' };
@@ -444,16 +560,21 @@ export default class LLMSuggestionService {
 
     const client = await this.ensureClient();
     const modelName = this.resolveSituationModelName(this.currentLLMConfig, suggestionConfig);
-    const prompt = this.buildSituationPrompt(context, heuristicResult);
+    const prompt = this.buildSituationPrompt(context, heuristicResult, {
+      silenceSeconds,
+      roleBurstCount,
+      triggerHint
+    });
 
     const requestParams = {
       model: modelName,
       temperature: 0,
       max_tokens: 120,
+      stream: true,
       messages: [
         {
           role: 'system',
-          content: '你是实时对话决策器，只返回 JSON，不输出任何其他文字。'
+          content: '你是实时对话决策器，只输出 TOON 表格，不输出任何其他文字。'
         },
         {
           role: 'user',
@@ -462,8 +583,6 @@ export default class LLMSuggestionService {
       ]
     };
 
-    let response;
-    try {
       console.log('Situation LLM Request Debug Info:', {
         payload,
         llmConfig: {
@@ -475,10 +594,100 @@ export default class LLMSuggestionService {
         requestParams
       });
 
-      response = await this.runWithTimeout(
-        client.chat.completions.create(requestParams),
+    const controller = new AbortController();
+
+    const buildResult = (parsed = {}) => {
+      const needOptions = this.parseBoolean(parsed.need_options ?? parsed.should_suggest ?? parsed.should_intervene);
+      const shouldIntervene = this.parseBoolean(parsed.should_intervene ?? parsed.should_suggest ?? parsed.need_options ?? needOptions);
+      return {
+        shouldIntervene,
+        shouldSuggest: needOptions,
+        needOptions,
+        trigger: parsed.trigger || 'auto',
+        reason: parsed.reason || 'llm_evaluation',
+        confidence: this.clampConfidence(parsed.confidence),
+        features: null,
+        model: modelName
+      };
+    };
+
+    try {
+      const stream = await this.runWithTimeout(
+        client.chat.completions.create({
+          ...requestParams,
+          stream: true,
+          signal: controller.signal
+        }),
         DEFAULT_SITUATION_TIMEOUT_MS
       );
+
+      return await new Promise((resolve, reject) => {
+        let buffer = '';
+        let headerParsed = false;
+        let fields = [];
+        let lastParsed = null;
+        const headerRegex = /^situation\[(\d+)\]\{([^}]+)\}:\s*$/i;
+        let resolved = false;
+
+        const finish = (parsedObj) => {
+          if (resolved) return;
+          resolved = true;
+          controller.abort();
+          resolve(buildResult(parsedObj || lastParsed || {}));
+        };
+
+        const processLine = (line) => {
+          if (!line) return;
+          if (!headerParsed) {
+            const match = line.match(headerRegex);
+            if (match) {
+              headerParsed = true;
+              fields = match[2]
+                .split(',')
+                .map((f) => f.trim())
+                .filter(Boolean);
+            }
+            return;
+          }
+
+          const values = this.csvSplit(line);
+          const parsedObj = {};
+          fields.forEach((field, idx) => {
+            parsedObj[field] = values[idx] !== undefined ? values[idx].trim() : '';
+          });
+          lastParsed = parsedObj;
+
+          const needOptions = this.parseBoolean(
+            parsedObj.need_options ?? parsedObj.should_suggest ?? parsedObj.should_intervene
+          );
+          // 只要判定需要就立即返回，其余字段后续不必等待
+          if (needOptions || headerParsed) {
+            finish(parsedObj);
+          }
+        };
+
+        (async () => {
+          try {
+            for await (const chunk of stream) {
+              const content = chunk?.choices?.[0]?.delta?.content;
+              if (!content) continue;
+              buffer += content;
+              let newlineIndex = buffer.indexOf('\n');
+              while (newlineIndex >= 0) {
+                const line = buffer.slice(0, newlineIndex).trim();
+                buffer = buffer.slice(newlineIndex + 1);
+                processLine(line);
+                newlineIndex = buffer.indexOf('\n');
+              }
+            }
+            // 流结束，若未解析到则用最后记录
+            finish(lastParsed || {});
+          } catch (error) {
+            if (error?.name === 'AbortError' && resolved) return;
+            reject(error);
+          }
+        })();
+      });
     } catch (error) {
       console.error('Situation LLM Request Failed - Full Debug Info:', {
         error: {
@@ -507,22 +716,6 @@ export default class LLMSuggestionService {
       });
       throw error;
     }
-
-    const raw = response?.choices?.[0]?.message?.content?.trim();
-    const parsed = this.extractJSON(raw) || {};
-    const shouldIntervene = Boolean(parsed.should_intervene ?? parsed.should_suggest ?? parsed.need_options);
-    const needOptions = Boolean(parsed.need_options ?? parsed.should_suggest ?? parsed.should_intervene);
-
-    return {
-      shouldIntervene,
-      shouldSuggest: needOptions,
-      needOptions,
-      trigger: parsed.trigger || 'auto',
-      reason: parsed.reason || 'llm_evaluation',
-      confidence: this.clampConfidence(parsed.confidence),
-      features: null,
-      model: modelName
-    };
   }
 
   async detectTopicShift(payload = {}) {

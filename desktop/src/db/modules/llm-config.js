@@ -98,15 +98,19 @@ export default function LLMConfigManager(BaseClass) {
 
     async testLLMConnection(configData) {
       this.ensureLLMSchema();
+      let requestParams;
+      let clientConfig;
+
       try {
         const { default: OpenAI } = await import('openai');
-        const config = { apiKey: configData.api_key };
-        if (configData.base_url) {
-          config.baseURL = configData.base_url;
+        clientConfig = { apiKey: configData.api_key };
+        const normalizedBaseURL = this.normalizeLLMBaseURL(configData.base_url);
+        if (normalizedBaseURL) {
+          clientConfig.baseURL = normalizedBaseURL;
         }
 
-        const client = new OpenAI(config);
-        const requestParams = {
+        const client = new OpenAI(clientConfig);
+        requestParams = {
           model: configData.model_name || 'gpt-4o-mini',
           messages: [{ role: 'user', content: 'test' }],
           max_tokens: 1,
@@ -120,7 +124,7 @@ export default function LLMConfigManager(BaseClass) {
             model_name: configData.model_name
           },
           requestParams,
-          clientConfig: config
+          clientConfig
         });
 
         const testResponse = await client.chat.completions.create(requestParams);
@@ -146,8 +150,8 @@ export default function LLMConfigManager(BaseClass) {
             base_url: configData.base_url,
             model_name: configData.model_name
           },
-          requestParams,
-          clientConfig: config
+          requestParams: requestParams || null,
+          clientConfig: clientConfig || null
         });
 
         let errorMessage = '连接失败';
@@ -175,6 +179,22 @@ export default function LLMConfigManager(BaseClass) {
         }
       }
       return fallback;
+    }
+
+    normalizeLLMBaseURL(baseURL) {
+      if (!baseURL || typeof baseURL !== 'string') {
+        return undefined;
+      }
+      const trimmed = baseURL.trim();
+      if (!trimmed) {
+        return undefined;
+      }
+      // OpenAI SDK 会自动拼接 /chat/completions，这里去掉用户可能输入的终点路径，避免 404
+      if (trimmed.endsWith('/chat/completions')) {
+        return trimmed.replace(/\/chat\/completions\/?$/, '');
+      }
+      // 统一去掉尾部斜杠
+      return trimmed.replace(/\/+$/, '');
     }
 
     ensureLLMSchema() {

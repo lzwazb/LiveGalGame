@@ -68,9 +68,8 @@ function main() {
     `--workpath "${buildDir}"`,
     // 打包 asr 目录，便于运行时子进程直接调用 python 脚本（不再构建独立 worker 可执行文件）
     `--add-data "${asrDir}${dataSep}asr"`,
-    // 隐式依赖收集：确保 funasr_onnx / torch 等在主包中一次性收集
+    // 隐式依赖收集：确保 funasr_onnx 等在主包中一次性收集
     '--collect-submodules funasr_onnx',
-    '--collect-submodules torch',
     '--collect-submodules ctranslate2',
     '--collect-submodules tokenizers',
     '--collect-submodules sentencepiece',
@@ -79,7 +78,6 @@ function main() {
     '--collect-all sentencepiece',
     '--collect-all numpy',
     '--hidden-import funasr_onnx',
-    '--hidden-import torch',
   ];
 
   // 统一使用 onedir，避免 onefile 的压缩/解压开销

@@ -5,7 +5,7 @@ const DEFAULT_SUGGESTION_CONFIG = {
   suggestion_count: 3,
   silence_threshold_seconds: 3,
   message_threshold_count: 3,
-  cooldown_seconds: 30,
+  cooldown_seconds: 15,
   context_message_limit: 10,
   topic_detection_enabled: 0,
   situation_llm_enabled: 0,
@@ -33,6 +33,7 @@ export const useSuggestions = (sessionInfo) => {
   const [suggestionConfig, setSuggestionConfig] = useState(DEFAULT_SUGGESTION_CONFIG);
   const [characterPendingCount, setCharacterPendingCount] = useState(0);
   const [lastCharacterMessageTs, setLastCharacterMessageTs] = useState(null);
+  const [lastUserMessageTs, setLastUserMessageTs] = useState(null);
   const [copiedSuggestionId, setCopiedSuggestionId] = useState(null);
   const suggestionCooldownRef = useRef(0);
   const topicDetectionStateRef = useRef({ running: false, lastMessageId: null });
@@ -81,7 +82,7 @@ export const useSuggestions = (sessionInfo) => {
       console.log('[useSuggestions] Passive suggestion disabled by config');
       return false;
     }
-    const cooldownMs = (suggestionConfig?.cooldown_seconds || 30) * 1000;
+    const cooldownMs = (suggestionConfig?.cooldown_seconds || 15) * 1000;
     const elapsed = Date.now() - (suggestionCooldownRef.current || 0);
     return elapsed >= cooldownMs;
   }, [suggestionConfig]);
@@ -234,63 +235,100 @@ export const useSuggestions = (sessionInfo) => {
   }, []);
 
   /**
-   * 运行话题检测
+   * 情景判定（冷场/连发统一交由 LLM 评估）
    */
-  const maybeRunTopicDetection = useCallback(async (message) => {
-    const detectionEnabled =
-      suggestionConfig?.situation_llm_enabled ?? suggestionConfig?.topic_detection_enabled;
-    if (!detectionEnabled) return;
-    if (!message?.content || !message?.id) return;
-    if (!sessionInfo?.conversationId || !sessionInfo?.characterId) return;
-    if (!TOPIC_HEURISTIC_REGEX.test(message.content)) return;
-    if (!window.electronAPI?.detectTopicShift) return;
+  const maybeRunSituationDetection = useCallback(
+    async (reasonHint, message, opts = {}) => {
+      const detectionEnabled =
+        suggestionConfig?.situation_llm_enabled ?? suggestionConfig?.topic_detection_enabled;
+      if (!detectionEnabled) return;
+      if (!sessionInfo?.conversationId || !sessionInfo?.characterId) return;
+      if (!window.electronAPI?.detectTopicShift) return;
+      if (!suggestionConfig?.enable_passive_suggestion) return;
+      if (!canTriggerPassive()) return;
+      if (suggestionStatus === 'streaming') return;
 
-    const currentState = topicDetectionStateRef.current;
-    if (currentState.running || currentState.lastMessageId === message.id) {
-      return;
-    }
+      const now = Date.now();
+      const silenceSecondsRaw =
+        lastUserMessageTs != null ? (now - lastUserMessageTs) / 1000 : null;
+      const silenceSeconds =
+        silenceSecondsRaw != null
+          ? Math.min(
+              Math.max(Number.isFinite(silenceSecondsRaw) ? silenceSecondsRaw : 0, 0),
+              60
+            )
+          : null;
+      const burstCountRaw =
+        opts.burstCountOverride !== undefined ? opts.burstCountOverride : characterPendingCount;
+      const burstCount = Math.min(Math.max(burstCountRaw || 0, 0), 8);
 
-    topicDetectionStateRef.current = { running: true, lastMessageId: message.id };
-    try {
-      const result = await window.electronAPI.detectTopicShift({
-        conversationId: sessionInfo.conversationId,
-        characterId: sessionInfo.characterId,
-        messageLimit: 6
-      });
-      if (result?.shouldSuggest) {
-        triggerPassiveSuggestion('topic_change');
+      const silenceReached =
+        silenceSeconds != null &&
+        silenceSeconds >= (suggestionConfig?.silence_threshold_seconds || 3);
+      const burstReached = burstCount >= (suggestionConfig?.message_threshold_count || 3);
+
+      if (!silenceReached && !burstReached) {
+        return;
       }
-    } catch (err) {
-      console.error('话题检测失败：', err);
-    } finally {
-      topicDetectionStateRef.current = {
-        ...topicDetectionStateRef.current,
-        running: false
-      };
-    }
-  }, [sessionInfo, suggestionConfig?.topic_detection_enabled, suggestionConfig?.situation_llm_enabled, triggerPassiveSuggestion]);
+
+      const currentState = topicDetectionStateRef.current;
+      if (currentState.running && currentState.lastMessageId === message?.id) {
+        return;
+      }
+
+      topicDetectionStateRef.current = { running: true, lastMessageId: message?.id || null };
+      try {
+        const result = await window.electronAPI.detectTopicShift({
+          conversationId: sessionInfo.conversationId,
+          characterId: sessionInfo.characterId,
+          messageLimit: 8,
+          silence_seconds: silenceSeconds,
+          role_burst_count: burstCount,
+          trigger_hint: reasonHint
+        });
+        if (result?.shouldSuggest) {
+          triggerPassiveSuggestion('topic_change');
+        }
+      } catch (err) {
+        console.error('情景判定失败：', err);
+      } finally {
+        topicDetectionStateRef.current = {
+          ...topicDetectionStateRef.current,
+          running: false
+        };
+      }
+    },
+    [
+      suggestionConfig,
+      sessionInfo,
+      canTriggerPassive,
+      suggestionStatus,
+      lastUserMessageTs,
+      characterPendingCount,
+      triggerPassiveSuggestion
+    ]
+  );
 
   /**
    * 处理新消息
    */
-  const handleNewMessage = useCallback((message) => {
-    if (message.sender === 'character') {
-      setCharacterPendingCount(prev => {
-        const next = prev + 1;
-        if (
-          suggestionConfig?.enable_passive_suggestion &&
-          next >= (suggestionConfig?.message_threshold_count || 3)
-        ) {
-          triggerPassiveSuggestion('message_count');
-        }
-        return next;
-      });
-      setLastCharacterMessageTs(Date.now());
-      maybeRunTopicDetection(message);
-    } else if (message.sender === 'user') {
-      setCharacterPendingCount(0);
-    }
-  }, [suggestionConfig, triggerPassiveSuggestion, maybeRunTopicDetection]);
+  const handleNewMessage = useCallback(
+    (message) => {
+      if (message.sender === 'character') {
+        setCharacterPendingCount((prev) => {
+          const next = prev + 1;
+          // 使用更新后的连发计数参与判定
+          maybeRunSituationDetection('message_burst', message, { burstCountOverride: next });
+          return next;
+        });
+        setLastCharacterMessageTs(Date.now());
+      } else if (message.sender === 'user') {
+        setCharacterPendingCount(0);
+        setLastUserMessageTs(Date.now());
+      }
+    },
+    [maybeRunSituationDetection]
+  );
 
   /**
    * 清除错误
@@ -512,6 +550,7 @@ export const useSuggestions = (sessionInfo) => {
       setSuggestionMeta(null);
       setCharacterPendingCount(0);
       setLastCharacterMessageTs(null);
+      setLastUserMessageTs(null);
       suggestionCooldownRef.current = 0;
       topicDetectionStateRef.current = { running: false, lastMessageId: null };
       resetStreamState('conversation_id_cleared');
@@ -523,6 +562,7 @@ export const useSuggestions = (sessionInfo) => {
     setSuggestionMeta(null);
     setCharacterPendingCount(0);
     setLastCharacterMessageTs(null);
+    setLastUserMessageTs(null);
     suggestionCooldownRef.current = 0;
     topicDetectionStateRef.current = { running: false, lastMessageId: null };
     // 如果有活跃流，避免强制重置导致流事件丢弃
@@ -536,15 +576,15 @@ export const useSuggestions = (sessionInfo) => {
   // 静默触发检查
   useEffect(() => {
     if (!suggestionConfig?.enable_passive_suggestion) return undefined;
-    if (!characterPendingCount || !lastCharacterMessageTs) return undefined;
+    if (!lastCharacterMessageTs) return undefined;
     const thresholdMs = (suggestionConfig?.silence_threshold_seconds || 3) * 1000;
-    const elapsed = Date.now() - lastCharacterMessageTs;
+    const elapsed = lastUserMessageTs ? Date.now() - lastUserMessageTs : 0;
     const wait = Math.max(thresholdMs - elapsed, 0);
     const timer = setTimeout(() => {
-      triggerPassiveSuggestion('silence');
+      maybeRunSituationDetection('silence_timer', null);
     }, wait);
     return () => clearTimeout(timer);
-  }, [characterPendingCount, lastCharacterMessageTs, suggestionConfig, triggerPassiveSuggestion]);
+  }, [lastCharacterMessageTs, lastUserMessageTs, suggestionConfig, maybeRunSituationDetection]);
 
   // 监听配置更新广播，实时刷新建议配置
   useEffect(() => {
@@ -556,6 +596,7 @@ export const useSuggestions = (sessionInfo) => {
         // 重置被动触发计数，避免旧计数在禁用后继续触发
         setCharacterPendingCount(0);
         setLastCharacterMessageTs(null);
+        setLastUserMessageTs(null);
       }
     };
     window.electronAPI?.on?.('suggestion-config-updated', handler);

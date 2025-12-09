@@ -1,7 +1,7 @@
 /**
  * 准备内置 Python 运行环境，供打包后使用。
  * - 创建 venv: desktop/python-env
- * - 安装 requirements.txt 中的依赖（包含 funasr、torch CPU 等）
+ * - 安装 requirements.txt 中的依赖（包含 funasr-onnx 等）
  *
  * 设计目标：
  * 1. 打包时将 python-env 放入 extraResources，客户端无需自行安装 Python。
@@ -215,8 +215,6 @@ function installDeps() {
           // 如果 --only-binary 也失败，逐个安装关键包（跳过可能有问题的传递依赖）
           console.warn('[prepare-python-env] --only-binary failed, installing critical packages individually...');
           const criticalPkgs = [
-            'torch==2.2.2',
-            'torchaudio==2.2.2',
             'funasr-onnx==0.4.1',
             'onnxruntime==1.21.1',
             'fastapi>=0.115.0',
@@ -228,8 +226,6 @@ function installDeps() {
             'numpy>=1.26.4,<2',
             'requests[socks]>=2.31.0',
             'httpx[socks]>=0.27.0',
-            'transformers>=4.38.0',
-            'optimum[onnxruntime]>=1.21.0',
           ];
           
           let allSuccess = true;
