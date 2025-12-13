@@ -1,5 +1,175 @@
 export default function AIAnalysisManager(BaseClass) {
   return class extends BaseClass {
+    ensureSuggestionDecisionSchema() {
+      if (this._suggestionDecisionSchemaEnsured) return;
+
+      // 1) 确保新表存在（即使老库里没有）
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS decision_points (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL,
+          anchor_message_id TEXT,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+          FOREIGN KEY (anchor_message_id) REFERENCES messages(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS suggestion_batches (
+          id TEXT PRIMARY KEY,
+          decision_point_id TEXT NOT NULL,
+          trigger TEXT,
+          reason TEXT,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (decision_point_id) REFERENCES decision_points(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_decision_points_conversation_id ON decision_points(conversation_id);
+        CREATE INDEX IF NOT EXISTS idx_suggestion_batches_decision_point_id ON suggestion_batches(decision_point_id);
+      `);
+
+      // 2) 迁移 ai_suggestions：需要新增列，并删除 is_used（SQLite 需重建表）
+      const columns = this.db.prepare('PRAGMA table_info(ai_suggestions)').all();
+      if (columns && columns.length > 0) {
+        const names = columns.map((c) => c.name);
+        const hasIsUsed = names.includes('is_used');
+        const hasDecisionPointId = names.includes('decision_point_id');
+        const hasBatchId = names.includes('batch_id');
+        const hasSuggestionIndex = names.includes('suggestion_index');
+
+        const needsRebuild =
+          hasIsUsed || !hasDecisionPointId || !hasBatchId || !hasSuggestionIndex;
+
+        if (needsRebuild) {
+          const transaction = this.db.transaction(() => {
+            this.db.prepare('ALTER TABLE ai_suggestions RENAME TO ai_suggestions_backup').run();
+
+            this.db.exec(`
+              CREATE TABLE IF NOT EXISTS ai_suggestions (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                message_id TEXT,
+                decision_point_id TEXT,
+                batch_id TEXT,
+                suggestion_index INTEGER,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                affinity_prediction INTEGER,
+                tags TEXT,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+                FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+              );
+            `);
+
+            const backupColumns = this.db.prepare('PRAGMA table_info(ai_suggestions_backup)').all();
+            const backupNames = backupColumns.map((c) => c.name);
+            const hasAffinity = backupNames.includes('affinity_prediction');
+            const hasTags = backupNames.includes('tags');
+
+            // 旧表没有 suggestion_index / decision_point_id / batch_id，统一置 NULL
+            const affinitySelect = hasAffinity ? 'affinity_prediction' : 'NULL';
+            const tagsSelect = hasTags ? 'tags' : "''";
+
+            this.db
+              .prepare(`
+                INSERT INTO ai_suggestions (
+                  id, conversation_id, message_id,
+                  decision_point_id, batch_id, suggestion_index,
+                  title, content, affinity_prediction, tags, created_at
+                )
+                SELECT
+                  id, conversation_id, message_id,
+                  NULL, NULL, NULL,
+                  title, content, ${affinitySelect}, ${tagsSelect}, created_at
+                FROM ai_suggestions_backup
+              `)
+              .run();
+
+            this.db.prepare('DROP TABLE ai_suggestions_backup').run();
+
+            // 索引补齐
+            this.db.prepare('CREATE INDEX IF NOT EXISTS idx_ai_suggestions_conversation_id ON ai_suggestions(conversation_id)').run();
+            this.db.prepare('CREATE INDEX IF NOT EXISTS idx_ai_suggestions_decision_point_id ON ai_suggestions(decision_point_id)').run();
+            this.db.prepare('CREATE INDEX IF NOT EXISTS idx_ai_suggestions_batch_id ON ai_suggestions(batch_id)').run();
+          });
+          transaction();
+        } else {
+          // 仅补齐索引
+          this.db.prepare('CREATE INDEX IF NOT EXISTS idx_ai_suggestions_decision_point_id ON ai_suggestions(decision_point_id)').run();
+          this.db.prepare('CREATE INDEX IF NOT EXISTS idx_ai_suggestions_batch_id ON ai_suggestions(batch_id)').run();
+        }
+      }
+
+      this._suggestionDecisionSchemaEnsured = true;
+    }
+
+    createDecisionPoint({ conversationId, anchorMessageId = null, createdAt = null } = {}) {
+      this.ensureSuggestionDecisionSchema();
+      if (!conversationId) throw new Error('conversationId is required');
+      const now = createdAt || Date.now();
+      const id = `dp-${now}-${Math.random().toString(36).slice(2, 8)}`;
+      this.db
+        .prepare(
+          `
+          INSERT INTO decision_points (id, conversation_id, anchor_message_id, created_at)
+          VALUES (@id, @conversation_id, @anchor_message_id, @created_at)
+        `
+        )
+        .run({
+          id,
+          conversation_id: conversationId,
+          anchor_message_id: anchorMessageId,
+          created_at: now
+        });
+      return id;
+    }
+
+    createSuggestionBatch({ decisionPointId, trigger = null, reason = null, createdAt = null } = {}) {
+      this.ensureSuggestionDecisionSchema();
+      if (!decisionPointId) throw new Error('decisionPointId is required');
+      const now = createdAt || Date.now();
+      const id = `batch-${now}-${Math.random().toString(36).slice(2, 8)}`;
+      this.db
+        .prepare(
+          `
+          INSERT INTO suggestion_batches (id, decision_point_id, trigger, reason, created_at)
+          VALUES (@id, @decision_point_id, @trigger, @reason, @created_at)
+        `
+        )
+        .run({
+          id,
+          decision_point_id: decisionPointId,
+          trigger,
+          reason,
+          created_at: now
+        });
+      return id;
+    }
+
+    getDecisionPointById(id) {
+      this.ensureSuggestionDecisionSchema();
+      if (!id) return null;
+      try {
+        const stmt = this.db.prepare('SELECT * FROM decision_points WHERE id = ?');
+        return stmt.get(id) || null;
+      } catch (error) {
+        console.error('Error getting decision point:', error);
+        return null;
+      }
+    }
+
+    getSuggestionBatchById(id) {
+      this.ensureSuggestionDecisionSchema();
+      if (!id) return null;
+      try {
+        const stmt = this.db.prepare('SELECT * FROM suggestion_batches WHERE id = ?');
+        return stmt.get(id) || null;
+      } catch (error) {
+        console.error('Error getting suggestion batch:', error);
+        return null;
+      }
+    }
+
     // 获取对话的AI分析报告
     getConversationAnalysis(conversationId) {
     try {
@@ -45,6 +215,7 @@ export default function AIAnalysisManager(BaseClass) {
   // 获取对话的行动建议
   getActionSuggestions(conversationId) {
     try {
+      this.ensureSuggestionDecisionSchema();
       const stmt = this.db.prepare(`
         SELECT * FROM ai_suggestions
         WHERE conversation_id = ?
@@ -60,6 +231,7 @@ export default function AIAnalysisManager(BaseClass) {
   // 保存行动建议到数据库
   saveActionSuggestion(suggestion, conversationId, messageId = null) {
     try {
+      this.ensureSuggestionDecisionSchema();
       if (!suggestion || !conversationId) {
         console.warn('[DB] saveActionSuggestion: Missing required fields', { suggestion, conversationId });
         return null;
@@ -67,11 +239,15 @@ export default function AIAnalysisManager(BaseClass) {
 
       const stmt = this.db.prepare(`
         INSERT INTO ai_suggestions (
-          id, conversation_id, message_id, title, content, 
-          affinity_prediction, tags, is_used, created_at
+          id, conversation_id, message_id,
+          decision_point_id, batch_id, suggestion_index,
+          title, content,
+          affinity_prediction, tags, created_at
         ) VALUES (
-          @id, @conversation_id, @message_id, @title, @content,
-          @affinity_prediction, @tags, @is_used, @created_at
+          @id, @conversation_id, @message_id,
+          @decision_point_id, @batch_id, @suggestion_index,
+          @title, @content,
+          @affinity_prediction, @tags, @created_at
         )
       `);
 
@@ -86,11 +262,18 @@ export default function AIAnalysisManager(BaseClass) {
         id: suggestionId,
         conversation_id: conversationId,
         message_id: messageId,
+        decision_point_id: suggestion.decision_point_id || suggestion.decisionPointId || null,
+        batch_id: suggestion.batch_id || suggestion.batchId || null,
+        suggestion_index:
+          suggestion.suggestion_index !== undefined
+            ? suggestion.suggestion_index
+            : suggestion.index !== undefined
+              ? suggestion.index
+              : null,
         title: suggestion.title || suggestion.content || '未命名建议',
         content: suggestion.content || suggestion.title || '',
         affinity_prediction: suggestion.affinity_prediction || null,
         tags: tagsStr,
-        is_used: suggestion.is_used || 0,
         created_at: suggestion.created_at || now
       });
 

@@ -74,6 +74,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getConversationReview: (conversationId) => ipcRenderer.invoke('review:get', conversationId),
   generateConversationReview: (conversationId, options = {}) =>
     ipcRenderer.invoke('review:generate', { conversationId, ...options }),
+  onReviewProgress: (callback) => {
+    const listener = (event, data) => callback(data);
+    ipcRenderer.on('review:progress', listener);
+    return () => ipcRenderer.removeListener('review:progress', listener);
+  },
 
   // LLM配置API
   saveLLMConfig: (configData) => ipcRenderer.invoke('llm-save-config', configData),

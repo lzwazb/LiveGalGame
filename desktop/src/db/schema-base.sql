@@ -1,4 +1,6 @@
--- LiveGalGame Database Schema
+-- LiveGalGame Database Base Schema
+-- 基础版本，不包含新的 decision_points 和 suggestion_batches 表
+-- 用于向后兼容旧数据库
 
 -- 攻略对象表
 CREATE TABLE IF NOT EXISTS characters (
@@ -66,14 +68,11 @@ CREATE TABLE IF NOT EXISTS ai_analysis (
   FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
--- AI建议记录表
+-- AI建议记录表（基础版本，兼容旧数据库）
 CREATE TABLE IF NOT EXISTS ai_suggestions (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL,
   message_id TEXT, -- 关联的具体消息（可选）
-  decision_point_id TEXT, -- 关联的决策点（同一决策点可有多批建议）
-  batch_id TEXT, -- 关联的建议批次（一次生成/换一批）
-  suggestion_index INTEGER, -- 批次内序号（0..n-1）
   title TEXT NOT NULL,
   content TEXT NOT NULL,
   affinity_prediction INTEGER, -- 好感度变化预测
@@ -81,26 +80,6 @@ CREATE TABLE IF NOT EXISTS ai_suggestions (
   created_at INTEGER NOT NULL,
   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
   FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
-);
-
--- 决策点表：代表“用户需要决定下一步怎么回复”的关键时刻
-CREATE TABLE IF NOT EXISTS decision_points (
-  id TEXT PRIMARY KEY,
-  conversation_id TEXT NOT NULL,
-  anchor_message_id TEXT, -- 锚点消息（触发时上下文的最后一条消息）
-  created_at INTEGER NOT NULL,
-  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
-  FOREIGN KEY (anchor_message_id) REFERENCES messages(id) ON DELETE SET NULL
-);
-
--- 建议批次表：一次生成/换一批 = 一个批次
-CREATE TABLE IF NOT EXISTS suggestion_batches (
-  id TEXT PRIMARY KEY,
-  decision_point_id TEXT NOT NULL,
-  trigger TEXT, -- manual/passive 等
-  reason TEXT,  -- manual/refresh/silence/topic_change 等
-  created_at INTEGER NOT NULL,
-  FOREIGN KEY (decision_point_id) REFERENCES decision_points(id) ON DELETE CASCADE
 );
 
 -- 角色详细信息表（从会话中总结）
@@ -150,24 +129,10 @@ CREATE TABLE IF NOT EXISTS suggestion_configs (
   situation_llm_enabled INTEGER DEFAULT 0,
   model_name TEXT DEFAULT 'gpt-4o-mini',
   situation_model_name TEXT DEFAULT 'gpt-4o-mini',
+  thinking_enabled INTEGER DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
-
--- 索引优化
-CREATE INDEX IF NOT EXISTS idx_conversations_character_id ON conversations(character_id);
-CREATE INDEX IF NOT EXISTS idx_conversations_date ON conversations(date);
-CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-CREATE INDEX IF NOT EXISTS idx_character_tags_character_id ON character_tags(character_id);
-CREATE INDEX IF NOT EXISTS idx_ai_analysis_conversation_id ON ai_analysis(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_ai_suggestions_conversation_id ON ai_suggestions(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_ai_suggestions_decision_point_id ON ai_suggestions(decision_point_id);
-CREATE INDEX IF NOT EXISTS idx_ai_suggestions_batch_id ON ai_suggestions(batch_id);
-CREATE INDEX IF NOT EXISTS idx_decision_points_conversation_id ON decision_points(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_suggestion_batches_decision_point_id ON suggestion_batches(decision_point_id);
-CREATE INDEX IF NOT EXISTS idx_character_details_character_id ON character_details(character_id);
-CREATE INDEX IF NOT EXISTS idx_llm_configs_is_default ON llm_configs(is_default);
 
 -- ==================== ASR（语音识别）相关表 ====================
 
@@ -218,6 +183,15 @@ CREATE TABLE IF NOT EXISTS asr_configs (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+-- 索引优化
+CREATE INDEX IF NOT EXISTS idx_conversations_character_id ON conversations(character_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_date ON conversations(date);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+CREATE INDEX IF NOT EXISTS idx_character_tags_character_id ON character_tags(character_id);
+CREATE INDEX IF NOT EXISTS idx_ai_analysis_conversation_id ON ai_analysis(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_ai_suggestions_conversation_id ON ai_suggestions(conversation_id);
 
 -- 索引优化
 CREATE INDEX IF NOT EXISTS idx_speech_records_conversation_id ON speech_recognition_records(conversation_id);

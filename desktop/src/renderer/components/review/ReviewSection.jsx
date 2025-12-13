@@ -4,15 +4,16 @@ import { useNavigate } from 'react-router-dom';
 import { useConversationReview } from '../../hooks/useConversationReview.js';
 
 export default function ReviewSection({ conversationId, onReviewGenerated }) {
-    const { review, isLoading, generate } = useConversationReview(conversationId);
+    const { review, isLoading, progress, generate } = useConversationReview(conversationId);
     const navigate = useNavigate();
 
     if (isLoading) {
+        const hint = progress?.message || '正在生成复盘分析...';
         return (
             <div className="rounded-2xl border border-border-light bg-surface-light p-4 shadow-sm dark:border-border-dark dark:bg-surface-dark flex items-center justify-center py-8">
                 <div className="flex flex-col items-center">
                     <div className="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-primary mb-2"></div>
-                    <p className="text-sm text-text-muted-light dark:text-text-muted-dark">正在生成复盘分析...</p>
+                    <p className="text-sm text-text-muted-light dark:text-text-muted-dark">{hint}</p>
                 </div>
             </div>
         );

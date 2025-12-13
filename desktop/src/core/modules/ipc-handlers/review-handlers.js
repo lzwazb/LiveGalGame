@@ -10,17 +10,36 @@ export function registerReviewHandlers({ reviewService }) {
     // 生成复盘
     ipcMain.handle('review:generate', async (event, payload) => {
         try {
-            const { conversationId, force = false } =
+            const { conversationId, force = false, requestId = null } =
                 typeof payload === 'object' && payload !== null
                     ? payload
-                    : { conversationId: payload, force: false };
+                    : { conversationId: payload, force: false, requestId: null };
 
             if (!conversationId) {
                 throw new Error('conversationId is required');
             }
 
-            console.log(`[IPC] Handling review:generate for conversation ${conversationId}, force=${force}`);
-            const review = await reviewService.generateReview(conversationId, { force });
+            const finalRequestId =
+                requestId || `review-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+            const sendProgress = (progress = {}) => {
+                try {
+                    if (!event?.sender || event.sender.isDestroyed?.()) return;
+                    event.sender.send('review:progress', { requestId: finalRequestId, ...progress });
+                } catch {
+                    // ignore
+                }
+            };
+
+            console.log(`[IPC] Handling review:generate for conversation ${conversationId}, force=${force}, requestId=${finalRequestId}`);
+            sendProgress({ stage: 'start', percent: 0, message: '开始生成复盘...' });
+
+            const review = await reviewService.generateReview(conversationId, {
+                force,
+                onProgress: sendProgress
+            });
+
+            sendProgress({ stage: 'done', percent: 1, message: '复盘完成' });
             return { success: true, data: review };
         } catch (error) {
             console.error(`[IPC] review:generate failed:`, error);

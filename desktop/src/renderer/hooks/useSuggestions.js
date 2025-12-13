@@ -110,9 +110,14 @@ export const useSuggestions = (sessionInfo) => {
         ? suggestions.slice(0, suggestionConfig?.suggestion_count || 5).map((item) => ({
           title: item.title || '',
           content: item.content || '',
-          tags: item.tags || []
+          tags: item.tags || [],
+          decisionPointId: item.decision_point_id || item.decisionPointId || null
         }))
         : [];
+      const decisionPointId =
+        reason === 'refresh'
+          ? (suggestions?.[0]?.decision_point_id || suggestions?.[0]?.decisionPointId || null)
+          : null;
       const streamId = `suggestion-stream-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       console.log(`[useSuggestions] Generated streamId: ${streamId}`);
       activeStreamRef.current = { id: streamId, trigger, reason };
@@ -127,6 +132,7 @@ export const useSuggestions = (sessionInfo) => {
         streamId,
         conversationId: sessionInfo.conversationId,
         characterId: sessionInfo.characterId,
+        decisionPointId,
         trigger,
         reason,
         optionCount: suggestionConfig?.suggestion_count,
@@ -176,9 +182,14 @@ export const useSuggestions = (sessionInfo) => {
         ? suggestions.slice(0, suggestionConfig?.suggestion_count || 5).map((item) => ({
           title: item.title || '',
           content: item.content || '',
-          tags: item.tags || []
+          tags: item.tags || [],
+          decisionPointId: item.decision_point_id || item.decisionPointId || null
         }))
         : [];
+      const decisionPointId =
+        reason === 'refresh'
+          ? (suggestions?.[0]?.decision_point_id || suggestions?.[0]?.decisionPointId || null)
+          : null;
 
       setSuggestionStatus('loading');
       setSuggestionError('');
@@ -186,6 +197,7 @@ export const useSuggestions = (sessionInfo) => {
         const result = await window.electronAPI.generateLLMSuggestions({
           conversationId: sessionInfo.conversationId,
           characterId: sessionInfo.characterId,
+          decisionPointId,
           trigger,
           reason,
           optionCount: suggestionConfig?.suggestion_count,

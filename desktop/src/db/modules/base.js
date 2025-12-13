@@ -119,13 +119,36 @@ export default class DatabaseBase {
     const transaction = this.db.transaction(() => {
       for (const statement of statements) {
         if (statement.trim()) {
-          this.db.exec(statement);
+          try {
+            this.db.exec(statement);
+          } catch (err) {
+            const msg = String(err?.message || err);
+            const upper = statement.trim().toUpperCase();
+            const ignorableIndexError =
+              upper.startsWith('CREATE INDEX') &&
+              (msg.includes('no such column') || msg.includes('has no column'));
+            if (ignorableIndexError) {
+              // 兼容老库：表已存在但列还未迁移时，schema.sql 的新索引会失败。后续 ensureSuggestionDecisionSchema 会补齐。
+              console.warn('[DB] Ignoring index creation error (will be fixed by migration):', msg);
+              continue;
+            }
+            throw err;
+          }
         }
       }
     });
 
     transaction();
     console.log('Database schema initialized');
+
+    // 预先执行关键迁移，避免 seed.sql 因旧表结构导致插入失败
+    try {
+      if (typeof this.ensureSuggestionDecisionSchema === 'function') {
+        this.ensureSuggestionDecisionSchema();
+      }
+    } catch (err) {
+      console.warn('[DB] ensureSuggestionDecisionSchema failed (will retry lazily on access):', err);
+    }
 
     // 初始化示例数据（如果数据库为空）
     this.seedSampleData();

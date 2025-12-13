@@ -81,11 +81,11 @@ INSERT OR IGNORE INTO messages (id, conversation_id, sender, content, timestamp,
 ('msg_hana_3_3', 'conv_hana_3', 'character', '那我们以后可以经常一起来。', 1735689804000, 0);
 
 -- 插入AI建议数据
-INSERT OR IGNORE INTO ai_suggestions (id, conversation_id, message_id, title, content, affinity_prediction, tags, is_used, created_at) VALUES
-('sugg_miyu_1', 'conv_miyu_1', 'msg_miyu_1_2', '提议具体地点', '我知道附近有个很棒的公园，樱花特别美，要不要去那里？', 15, '主动,体贴', 1, 1735689603000),
-('sugg_miyu_2', 'conv_miyu_1', 'msg_miyu_1_2', '表达期待', '太好了！我一直想和你一起去散步呢。', 10, '情感,真诚', 0, 1735689602000),
-('sugg_akira_1', 'conv_akira_2', 'msg_akira_2_2', '主动配合', '好的，我们一起看看哪些地方可以改进。', 8, '合作,积极', 1, 1735689702000),
-('sugg_hana_1', 'conv_hana_2', 'msg_hana_2_2', '表达兴趣', '太好了！我也正好想找新书看。', 12, '兴趣,共鸣', 1, 1735689703000);
+INSERT OR IGNORE INTO ai_suggestions (id, conversation_id, message_id, decision_point_id, batch_id, suggestion_index, title, content, affinity_prediction, tags, created_at) VALUES
+('sugg_miyu_1', 'conv_miyu_1', 'msg_miyu_1_2', NULL, NULL, NULL, '提议具体地点', '我知道附近有个很棒的公园，樱花特别美，要不要去那里？', 15, '主动,体贴', 1735689603000),
+('sugg_miyu_2', 'conv_miyu_1', 'msg_miyu_1_2', NULL, NULL, NULL, '表达期待', '太好了！我一直想和你一起去散步呢。', 10, '情感,真诚', 1735689602000),
+('sugg_akira_1', 'conv_akira_2', 'msg_akira_2_2', NULL, NULL, NULL, '主动配合', '好的，我们一起看看哪些地方可以改进。', 8, '合作,积极', 1735689702000),
+('sugg_hana_1', 'conv_hana_2', 'msg_hana_2_2', NULL, NULL, NULL, '表达兴趣', '太好了！我也正好想找新书看。', 12, '兴趣,共鸣', 1735689703000);
 
 -- 插入AI分析报告数据
 INSERT OR IGNORE INTO ai_analysis (id, conversation_id, message_id, insight_type, content, created_at) VALUES
@@ -143,16 +143,16 @@ INSERT OR IGNORE INTO ai_analysis (id, conversation_id, message_id, insight_type
 ('attitude_hana_3', 'conv_hana_3', NULL, 'attitude_analysis', '{"description":"对方在安静的环境中表现出放松和舒适，愿意一起度过安静的时光。虽然对话简短，但态度友好，愿意继续接触。","affinityChange":7,"trend":"上升"}', 1735689804000);
 
 -- 插入行动建议数据（可以尝试的话题和避开的话题）
-INSERT OR IGNORE INTO ai_suggestions (id, conversation_id, message_id, title, content, affinity_prediction, tags, is_used, created_at) VALUES
+INSERT OR IGNORE INTO ai_suggestions (id, conversation_id, message_id, decision_point_id, batch_id, suggestion_index, title, content, affinity_prediction, tags, created_at) VALUES
 -- Miyu 的行动建议
-('action_miyu_1', 'conv_miyu_1', NULL, '可以尝试的话题', '最近读过的书、喜欢的音乐风格、户外活动、美食推荐', NULL, '可以尝试,话题', 0, 1735689604000),
-('action_miyu_2', 'conv_miyu_1', NULL, '避开的话题', '过于功利的现实问题、工作压力、负面情绪', NULL, '避开,话题', 0, 1735689604000),
+('action_miyu_1', 'conv_miyu_1', NULL, NULL, NULL, NULL, '可以尝试的话题', '最近读过的书、喜欢的音乐风格、户外活动、美食推荐', NULL, '可以尝试,话题', 1735689604000),
+('action_miyu_2', 'conv_miyu_1', NULL, NULL, NULL, NULL, '避开的话题', '过于功利的现实问题、工作压力、负面情绪', NULL, '避开,话题', 1735689604000),
 -- Akira 的行动建议
-('action_akira_1', 'conv_akira_1', NULL, '可以尝试的话题', '学习计划、未来规划、兴趣爱好、共同目标', NULL, '可以尝试,话题', 0, 1735689604000),
-('action_akira_2', 'conv_akira_1', NULL, '避开的话题', '过于私人的问题、负面评价、抱怨', NULL, '避开,话题', 0, 1735689604000),
+('action_akira_1', 'conv_akira_1', NULL, NULL, NULL, NULL, '可以尝试的话题', '学习计划、未来规划、兴趣爱好、共同目标', NULL, '可以尝试,话题', 1735689604000),
+('action_akira_2', 'conv_akira_1', NULL, NULL, NULL, NULL, '避开的话题', '过于私人的问题、负面评价、抱怨', NULL, '避开,话题', 1735689604000),
 -- Hana 的行动建议
-('action_hana_1', 'conv_hana_1', NULL, '可以尝试的话题', '最近读过的书、喜欢的音乐风格、文学作品、安静的活动', NULL, '可以尝试,话题', 0, 1735689604000),
-('action_hana_2', 'conv_hana_1', NULL, '避开的话题', '过于功利的现实问题、嘈杂的环境、过于活跃的话题', NULL, '避开,话题', 0, 1735689604000);
+('action_hana_1', 'conv_hana_1', NULL, NULL, NULL, NULL, '可以尝试的话题', '最近读过的书、喜欢的音乐风格、文学作品、安静的活动', NULL, '可以尝试,话题', 1735689604000),
+('action_hana_2', 'conv_hana_1', NULL, NULL, NULL, NULL, '避开的话题', '过于功利的现实问题、嘈杂的环境、过于活跃的话题', NULL, '避开,话题', 1735689604000);
 
 -- 插入线上场景的复杂对话数据（面向宅男用户）
 
@@ -698,14 +698,14 @@ INSERT OR IGNORE INTO messages (id, conversation_id, sender, content, timestamp,
 ('msg_review120_120', 'conv_review_stress_1', 'user', '谢谢，晚安', 1737600011900, 0);
 
 -- 多批次选项生成记录（用于节点分组）
-INSERT OR IGNORE INTO ai_suggestions (id, conversation_id, message_id, title, content, affinity_prediction, tags, is_used, created_at) VALUES
-('sugg_review1_a', 'conv_review_stress_1', 'msg_review120_040', '主动约时间', '提出周末一起逛书店', 2, '约会,书店', 0, 1737600004050),
-('sugg_review1_b', 'conv_review_stress_1', 'msg_review120_040', '保持关心', '询问她最近的压力点', 1, '关心,情绪', 0, 1737600004050),
-('sugg_review1_c', 'conv_review_stress_1', 'msg_review120_040', '轻松话题', '继续聊动漫和歌曲', 1, '兴趣,话题', 0, 1737600004050),
-('sugg_review2_a', 'conv_review_stress_1', 'msg_review120_080', '共创计划', '提出一起录歌并分享', 3, '音乐,合作', 0, 1737600008050),
-('sugg_review2_b', 'conv_review_stress_1', 'msg_review120_080', '健康建议', '建议一起保持运动打卡', 2, '健康,运动', 0, 1737600008050),
-('sugg_review2_c', 'conv_review_stress_1', 'msg_review120_080', '情感确认', '表达陪伴的感谢与肯定', 2, '情感,陪伴', 0, 1737600008050),
-('sugg_review3_a', 'conv_review_stress_1', 'msg_review120_110', '明确邀约', '确定周日看电影并买票', 3, '邀约,电影', 0, 1737600011050),
-('sugg_review3_b', 'conv_review_stress_1', 'msg_review120_110', '贴心提醒', '提前发送歌单帮助放松', 1, '贴心,音乐', 0, 1737600011050),
-('sugg_review3_c', 'conv_review_stress_1', 'msg_review120_110', '节奏控制', '建议早点休息保持状态', 1, '关心,休息', 0, 1737600011050);
+INSERT OR IGNORE INTO ai_suggestions (id, conversation_id, message_id, decision_point_id, batch_id, suggestion_index, title, content, affinity_prediction, tags, created_at) VALUES
+('sugg_review1_a', 'conv_review_stress_1', 'msg_review120_040', NULL, NULL, NULL, '主动约时间', '提出周末一起逛书店', 2, '约会,书店', 1737600004050),
+('sugg_review1_b', 'conv_review_stress_1', 'msg_review120_040', NULL, NULL, NULL, '保持关心', '询问她最近的压力点', 1, '关心,情绪', 1737600004050),
+('sugg_review1_c', 'conv_review_stress_1', 'msg_review120_040', NULL, NULL, NULL, '轻松话题', '继续聊动漫和歌曲', 1, '兴趣,话题', 1737600004050),
+('sugg_review2_a', 'conv_review_stress_1', 'msg_review120_080', NULL, NULL, NULL, '共创计划', '提出一起录歌并分享', 3, '音乐,合作', 1737600008050),
+('sugg_review2_b', 'conv_review_stress_1', 'msg_review120_080', NULL, NULL, NULL, '健康建议', '建议一起保持运动打卡', 2, '健康,运动', 1737600008050),
+('sugg_review2_c', 'conv_review_stress_1', 'msg_review120_080', NULL, NULL, NULL, '情感确认', '表达陪伴的感谢与肯定', 2, '情感,陪伴', 1737600008050),
+('sugg_review3_a', 'conv_review_stress_1', 'msg_review120_110', NULL, NULL, NULL, '明确邀约', '确定周日看电影并买票', 3, '邀约,电影', 1737600011050),
+('sugg_review3_b', 'conv_review_stress_1', 'msg_review120_110', NULL, NULL, NULL, '贴心提醒', '提前发送歌单帮助放松', 1, '贴心,音乐', 1737600011050),
+('sugg_review3_c', 'conv_review_stress_1', 'msg_review120_110', NULL, NULL, NULL, '节奏控制', '建议早点休息保持状态', 1, '关心,休息', 1737600011050);
 

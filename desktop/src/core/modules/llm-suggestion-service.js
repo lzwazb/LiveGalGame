@@ -100,6 +100,7 @@ export default class LLMSuggestionService {
     const {
       conversationId,
       characterId,
+      decisionPointId: incomingDecisionPointId,
       trigger = 'manual',
       reason = 'manual',
       optionCount,
@@ -176,6 +177,37 @@ export default class LLMSuggestionService {
       ? context.history[context.history.length - 1]?.id || null
       : null;
 
+    // 决策点：refresh 必须复用；否则新建
+    let decisionPointId = incomingDecisionPointId || null;
+    if (!decisionPointId && conversationId && this.db.createDecisionPoint) {
+      try {
+        decisionPointId = this.db.createDecisionPoint({
+          conversationId,
+          anchorMessageId: latestMessageId,
+          createdAt: batchTimestamp
+        });
+      } catch (error) {
+        console.warn('[LLMSuggestionService] Failed to create decision point, falling back to null:', error);
+        decisionPointId = null;
+      }
+    }
+
+    // 每次生成 = 一个批次（包含 trigger/reason），用于区分“换一批”
+    let batchId = null;
+    if (decisionPointId && this.db.createSuggestionBatch) {
+      try {
+        batchId = this.db.createSuggestionBatch({
+          decisionPointId,
+          trigger,
+          reason,
+          createdAt: batchTimestamp
+        });
+      } catch (error) {
+        console.warn('[LLMSuggestionService] Failed to create suggestion batch, falling back to null:', error);
+        batchId = null;
+      }
+    }
+
     console.log('[LLMSuggestionService] Creating TOON parser');
     const parser = createToonSuggestionStreamParser({
       onHeader: (header) => {
@@ -193,6 +225,9 @@ export default class LLMSuggestionService {
         const suggestionIndex = emittedCount;
         const suggestion = this.decorateSuggestion(item, emittedCount, { trigger, reason }, batchTimestamp);
         suggestion.index = suggestionIndex;
+        suggestion.suggestion_index = suggestionIndex;
+        suggestion.decision_point_id = decisionPointId;
+        suggestion.batch_id = batchId;
         console.log(`[LLMSuggestionService] Decorated suggestion:`, suggestion);
         emittedCount += 1;
 

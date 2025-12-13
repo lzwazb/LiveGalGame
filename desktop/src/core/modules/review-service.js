@@ -6,6 +6,13 @@ export default class ReviewService {
         this.clientConfigSignature = null; // 保留兼容字段
         this.currentLLMConfig = null;
         this.currentLLMFeature = 'review';
+
+        // 复盘输入规模控制（避免超长对话导致上下文爆炸）
+        this.MAX_NODES = 15;
+        this.MAX_MESSAGES = 120;
+        this.MAX_OPTIONS_PER_NODE = 6;
+        // 粗略 token 上限（经验值）：超出会触发更激进裁剪
+        this.MAX_PROMPT_TOKENS_EST = 12000;
     }
 
     get db() {
@@ -50,6 +57,19 @@ export default class ReviewService {
     // 1. 生成复盘报告
     async generateReview(conversationId, options = {}) {
         const force = !!options.force;
+        const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+        const report = (stage, percent, message, extra = null) => {
+            try {
+                onProgress?.({
+                    stage,
+                    percent,
+                    message,
+                    ...(extra ? { extra } : {})
+                });
+            } catch {
+                // ignore
+            }
+        };
 
         // 检查是否已有复盘
         const existing = this.getExistingReview(conversationId);
@@ -58,43 +78,66 @@ export default class ReviewService {
         }
 
         // 1. 获取消息和选项
-        const messages = this.db.getMessagesByConversation(conversationId);
-        const suggestions = this.db.getActionSuggestions(conversationId); // 需要在 db 中确认此方法存在，或者使用 getActionSuggestions
+        report('load_data', 0.05, '加载对话与建议数据...');
+        const messagesRaw = this.db.getMessagesByConversation(conversationId);
+        const suggestions = this.db.getActionSuggestions(conversationId);
 
         // 2. 按时间戳分组，识别节点
-        const nodes = this.groupIntoNodes(suggestions);
+        report('group_nodes', 0.15, '识别决策点并分组...');
+        const nodesRaw = this.groupIntoNodes(suggestions);
         const conversation = this.db.getConversationById(conversationId);
 
         // 3. 特殊情况处理：
         // - 如果没有节点但有消息，仍然走 LLM 复盘（不降级），让模型给出完整总结
         // - 如果既没有节点也没有消息，才使用兜底简要复盘
-        const hasMessages = Array.isArray(messages) && messages.length > 0;
-        if (nodes.length === 0 && !hasMessages) {
+        const hasMessages = Array.isArray(messagesRaw) && messagesRaw.length > 0;
+        if (nodesRaw.length === 0 && !hasMessages) {
             const simpleReview = this.buildSimpleSummary(conversation);
+            report('save', 0.9, '保存复盘结果...');
             this.db.saveConversationReview({
                 conversation_id: conversationId,
                 review_data: simpleReview,
                 model_used: 'none'
             });
+            report('done', 1, '复盘完成');
             return simpleReview;
         }
+
+        report('trim', 0.25, '裁剪输入规模以避免超长上下文...');
+        const { messages, nodes, trimInfo } = this.trimReviewInputs(messagesRaw, nodesRaw);
 
         // 4. 调用 LLM 分析（带一次重试）
         let reviewData;
         try {
+            report('llm_request', 0.35, '调用模型生成复盘（可能需要一些时间）...', trimInfo);
             reviewData = await this.callLLMForReview(messages, nodes);
+            report('parse', 0.75, '解析模型输出...');
         } catch (err) {
-            console.warn('[ReviewService] LLM 调用失败，正在重试一次...', err);
-            reviewData = await this.callLLMForReview(messages, nodes);
+            console.warn('[ReviewService] LLM 调用失败，准备重试...', err);
+            // 针对“上下文过长”做更激进裁剪再重试；其他错误维持一次重试
+            if (this.isLikelyContextLimitError(err)) {
+                console.warn('[ReviewService] Suspected context window issue. Retrying with aggressive trimming...');
+                const aggressive = this.trimReviewInputs(messagesRaw, nodesRaw, { aggressive: true });
+                report('llm_request', 0.35, '上下文疑似超限，已裁剪后重试...', aggressive.trimInfo);
+                reviewData = await this.callLLMForReview(aggressive.messages, aggressive.nodes);
+                report('parse', 0.75, '解析模型输出...');
+            } else {
+                report('llm_request', 0.35, '调用失败，准备重试一次...');
+                reviewData = await this.callLLMForReview(messages, nodes);
+                report('parse', 0.75, '解析模型输出...');
+            }
         }
 
         // 5. 补充 ghost_options
+        report('enrich', 0.82, '补齐未选择路径（ghost options）...');
         this.enrichGhostOptions(reviewData, nodes);
 
         // 6. 校验/兜底
+        report('validate', 0.86, '校验并兜底复盘结构...');
         reviewData = this.ensureReviewDataIntegrity(reviewData, nodes, conversation);
 
         // 7. 保存
+        report('save', 0.9, '保存复盘结果...');
         this.db.saveConversationReview({
             conversation_id: conversationId,
             review_data: reviewData,
@@ -103,6 +146,7 @@ export default class ReviewService {
 
         // 8. 更新会话信息（标题、摘要、Tag、好感度）
         if (reviewData.summary) {
+            report('update_conversation', 0.95, '更新会话摘要与标签...');
             const updates = {};
             if (reviewData.summary.title) updates.title = reviewData.summary.title;
             if (reviewData.summary.conversation_summary) updates.summary = reviewData.summary.conversation_summary;
@@ -114,7 +158,70 @@ export default class ReviewService {
             }
         }
 
+        report('done', 1, '复盘完成');
         return reviewData;
+    }
+
+    estimateTokens(text = '') {
+        if (!text) return 0;
+        // 经验：中英混合平均 1 token ~ 3-4 chars，取 4 做保守估计
+        return Math.ceil(String(text).length / 4);
+    }
+
+    isLikelyContextLimitError(err) {
+        const msg = String(err?.message || '').toLowerCase();
+        return (
+            msg.includes('context') ||
+            msg.includes('maximum context') ||
+            msg.includes('max context') ||
+            msg.includes('token') ||
+            msg.includes('length') ||
+            msg.includes('too large')
+        );
+    }
+
+    trimReviewInputs(messagesRaw, nodesRaw, opts = {}) {
+        const aggressive = !!opts.aggressive;
+        const maxNodes = aggressive ? Math.max(6, Math.floor(this.MAX_NODES / 2)) : this.MAX_NODES;
+        const maxMessages = aggressive ? Math.max(40, Math.floor(this.MAX_MESSAGES / 2)) : this.MAX_MESSAGES;
+        const maxOptions = aggressive ? Math.max(3, Math.floor(this.MAX_OPTIONS_PER_NODE / 2)) : this.MAX_OPTIONS_PER_NODE;
+
+        const messages = Array.isArray(messagesRaw) ? [...messagesRaw] : [];
+        const nodes = Array.isArray(nodesRaw) ? [...nodesRaw] : [];
+
+        // 1) 先限制 nodes 数量：保留最近 maxNodes 个（按 timestamp）
+        nodes.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        const trimmedNodes = nodes.length > maxNodes ? nodes.slice(nodes.length - maxNodes) : nodes;
+
+        // 2) 限制每个节点的 options 数量（保留最靠前的若干条，通常 index=0..）
+        const finalNodes = trimmedNodes.map((n) => ({
+            ...n,
+            suggestions: Array.isArray(n.suggestions) ? n.suggestions.slice(0, maxOptions) : []
+        }));
+
+        // 3) 限制消息数量：保留最近 maxMessages 条
+        messages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        const finalMessages = messages.length > maxMessages ? messages.slice(messages.length - maxMessages) : messages;
+
+        // 4) 如仍超估计 token，上下文再裁一次（优先裁消息）
+        const promptPreview = this.buildReviewPrompt(finalMessages, finalNodes);
+        const est = this.estimateTokens(promptPreview);
+        if (est > this.MAX_PROMPT_TOKENS_EST) {
+            const moreAggressiveMessages = finalMessages.slice(Math.max(0, finalMessages.length - Math.floor(maxMessages / 2)));
+            const moreAggressivePrompt = this.buildReviewPrompt(moreAggressiveMessages, finalNodes);
+            const est2 = this.estimateTokens(moreAggressivePrompt);
+            return {
+                messages: moreAggressiveMessages,
+                nodes: finalNodes,
+                trimInfo: { aggressive, nodes: { before: nodesRaw?.length || 0, after: finalNodes.length }, messages: { before: messagesRaw?.length || 0, after: moreAggressiveMessages.length }, tokenEst: { before: est, after: est2 } }
+            };
+        }
+
+        return {
+            messages: finalMessages,
+            nodes: finalNodes,
+            trimInfo: { aggressive, nodes: { before: nodesRaw?.length || 0, after: finalNodes.length }, messages: { before: messagesRaw?.length || 0, after: finalMessages.length }, tokenEst: { est } }
+        };
     }
 
     // 获取已有复盘
@@ -126,74 +233,118 @@ export default class ReviewService {
     groupIntoNodes(suggestions) {
         if (!suggestions || suggestions.length === 0) return [];
 
-        // 按 created_at 排序，如果时间戳相同，则按 index 排序
-        const sorted = [...suggestions].sort((a, b) => {
-            if (a.created_at !== b.created_at) {
-                return a.created_at - b.created_at;
-            }
-            // 时间戳相同时，按 index 排序（如果存在）
-            const aIndex = a.index !== undefined ? a.index : 999;
-            const bIndex = b.index !== undefined ? b.index : 999;
-            return aIndex - bIndex;
-        });
-
-        const groups = [];
-        let currentGroup = [sorted[0]];
-
-        for (let i = 1; i < sorted.length; i++) {
-            const prev = currentGroup[currentGroup.length - 1];
-            const curr = sorted[i];
-
-            // 判断是否应该开始新的一组：
-            // 1. 时间差超过1秒（主要判断条件）
-            // 2. 或者时间戳相同但index重置为0（说明是新的一批，但时间戳可能因为修复前的bug而不一致）
-            const timeDiff = curr.created_at - prev.created_at;
-            const hasIndexInfo = curr.index !== undefined && prev.index !== undefined;
-            const isIndexReset = hasIndexInfo && curr.index === 0 && prev.index >= 0 && prev.index < 3;
-            const isFullBatch = currentGroup.length >= 3;
-
-            // 如果时间戳相同（或非常接近），且不是index重置，则归为同一组
-            // 如果时间差超过1秒，则开始新组
-            // 如果时间差小于1秒但index重置且当前组已满，则开始新组（处理旧数据）
-            if (timeDiff < 1000 && !(isFullBatch && isIndexReset)) {
-                currentGroup.push(curr);
-            } else {
-                groups.push(currentGroup);
-                currentGroup = [curr];
-            }
+        const withDecisionPoint = [];
+        const legacy = [];
+        for (const s of suggestions) {
+            if (s && s.decision_point_id) withDecisionPoint.push(s);
+            else legacy.push(s);
         }
-        groups.push(currentGroup);
 
-        // 限制每个节点的suggestion数量，最多保留3个
-        return groups.map((group, index) => {
-            let filteredGroup = group;
+        const nodes = [];
 
-            if (group.length > 3) {
-                // 如果一组中有超过3个suggestion，可能是多次生成的结果
-                // 按index排序，优先保留index 0,1,2的完整批次
-                const sortedByIndex = [...group].sort((a, b) => {
-                    const aIndex = a.index !== undefined ? a.index : 999;
-                    const bIndex = b.index !== undefined ? b.index : 999;
+        // 1) 新版：按 decision_point_id 聚合；同一决策点内取“最新 batch”作为该节点的选项
+        if (withDecisionPoint.length > 0) {
+            const byDP = new Map();
+            for (const s of withDecisionPoint) {
+                const dpId = s.decision_point_id;
+                if (!byDP.has(dpId)) byDP.set(dpId, []);
+                byDP.get(dpId).push(s);
+            }
+
+            // 按决策点的最早 created_at 排序，稳定输出 node_1..n
+            const dpGroups = [...byDP.entries()].map(([dpId, list]) => {
+                const minTs = Math.min(...list.map((x) => x.created_at || 0));
+                const maxTs = Math.max(...list.map((x) => x.created_at || 0));
+                return { dpId, list, minTs, maxTs };
+            }).sort((a, b) => a.minTs - b.minTs);
+
+            for (const group of dpGroups) {
+                // 找最新批次：优先按 batch_id 分组，取 created_at 最大的 batch
+                const byBatch = new Map();
+                for (const s of group.list) {
+                    const batchId = s.batch_id || 'unknown';
+                    if (!byBatch.has(batchId)) byBatch.set(batchId, []);
+                    byBatch.get(batchId).push(s);
+                }
+                const batchCount = byBatch.size;
+
+                let latestBatchId = null;
+                let latestBatchTs = -1;
+                for (const [batchId, list] of byBatch.entries()) {
+                    const ts = Math.max(...list.map((x) => x.created_at || 0));
+                    if (ts > latestBatchTs) {
+                        latestBatchTs = ts;
+                        latestBatchId = batchId;
+                    }
+                }
+
+                const latest = (latestBatchId && byBatch.get(latestBatchId)) ? byBatch.get(latestBatchId) : group.list;
+                const sortedLatest = [...latest].sort((a, b) => {
+                    const aIndex = a.suggestion_index ?? a.index ?? 999;
+                    const bIndex = b.suggestion_index ?? b.index ?? 999;
                     return aIndex - bIndex;
                 });
 
-                // 找出第一个完整的批次（index 0,1,2）
-                const firstBatch = sortedByIndex.filter(s => s.index !== undefined && s.index < 3);
-                if (firstBatch.length === 3) {
-                    filteredGroup = firstBatch;
-                } else {
-                    // 如果没有完整的批次，保留前3个（按时间顺序）
-                    filteredGroup = group.slice(0, 3);
-                }
-                console.warn(`[ReviewService] Node ${index + 1} has ${group.length} suggestions (expected 3), limiting to ${filteredGroup.length}. IDs: ${group.map(s => s.id).join(', ')}`);
+                nodes.push({
+                    decision_point_id: group.dpId,
+                    batch_id: latestBatchId !== 'unknown' ? latestBatchId : null,
+                    batch_count: batchCount,
+                    timestamp: sortedLatest[0]?.created_at || group.minTs,
+                    suggestions: sortedLatest
+                });
             }
+        }
 
-            return {
+        // 2) 旧版数据：回退到时间窗口分组（保留原逻辑，但不再硬丢弃为3条）
+        if (legacy.length > 0) {
+            // 按 created_at 排序，如果时间戳相同，则按 index 排序
+            const sorted = [...legacy].sort((a, b) => {
+                if (a.created_at !== b.created_at) {
+                    return a.created_at - b.created_at;
+                }
+                const aIndex = a.index !== undefined ? a.index : 999;
+                const bIndex = b.index !== undefined ? b.index : 999;
+                return aIndex - bIndex;
+            });
+
+            const groups = [];
+            let currentGroup = [sorted[0]];
+
+            for (let i = 1; i < sorted.length; i++) {
+                const prev = currentGroup[currentGroup.length - 1];
+                const curr = sorted[i];
+
+                const timeDiff = curr.created_at - prev.created_at;
+                const hasIndexInfo = curr.index !== undefined && prev.index !== undefined;
+                const isIndexReset = hasIndexInfo && curr.index === 0 && prev.index >= 0 && prev.index < 3;
+                const isFullBatch = currentGroup.length >= 3;
+
+                if (timeDiff < 1000 && !(isFullBatch && isIndexReset)) {
+                    currentGroup.push(curr);
+                } else {
+                    groups.push(currentGroup);
+                    currentGroup = [curr];
+                }
+            }
+            groups.push(currentGroup);
+
+            const legacyNodes = groups.map((group) => ({
+                timestamp: group[0].created_at,
+                suggestions: group
+            }));
+            nodes.push(...legacyNodes);
+        }
+
+        // 统一生成 node_id
+        return nodes
+            .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+            .map((node, index) => ({
                 node_id: `node_${index + 1}`,
-                timestamp: filteredGroup[0].created_at,
-                suggestions: filteredGroup
-            };
-        });
+                timestamp: node.timestamp || 0,
+                decision_point_id: node.decision_point_id || null,
+                batch_id: node.batch_id || null,
+                suggestions: node.suggestions || []
+            }));
     }
 
     // 构建 Prompt
@@ -210,8 +361,37 @@ export default class ReviewService {
 
         const nodeInfo = nodes.length > 0
             ? nodes.map((node, i) => {
+                const dpInfo = node.decision_point_id ? `, DP:${node.decision_point_id}` : '';
+                const batchInfo = node.batch_id ? `, Batch:${node.batch_id}` : '';
+                const batchCountInfo = node.batch_count && node.batch_count > 1 ? `, BatchCount:${node.batch_count}` : '';
+
+                // 补充上下文：决策点锚点消息 + 本批次触发信息（可解释“为什么弹建议/是否换一批”）
+                let anchorLine = '';
+                let triggerLine = '';
+                try {
+                    if (node.decision_point_id && this.db.getDecisionPointById) {
+                        const dp = this.db.getDecisionPointById(node.decision_point_id);
+                        const anchorId = dp?.anchor_message_id;
+                        if (anchorId && this.db.getMessageById) {
+                            const msg = this.db.getMessageById(anchorId);
+                            if (msg) {
+                                anchorLine = `锚点消息: [${formatTime(msg.timestamp)}] ${msg.sender === 'user' ? 'User' : 'Character'}: ${msg.content}`;
+                            }
+                        }
+                    }
+                    if (node.batch_id && this.db.getSuggestionBatchById) {
+                        const batch = this.db.getSuggestionBatchById(node.batch_id);
+                        if (batch) {
+                            triggerLine = `触发: ${batch.trigger || 'unknown'} / ${batch.reason || 'unknown'}`;
+                        }
+                    }
+                } catch {
+                    // ignore
+                }
+
                 const options = node.suggestions.map(s => `  - ID:${s.id} 内容:${s.content || s.title}`).join('\n');
-                return `节点${i + 1} (ID: ${node.node_id}, Time: ${formatTime(node.timestamp)}):\n${options}`;
+                const extraLines = [triggerLine, anchorLine].filter(Boolean).map((l) => `  ${l}`).join('\n');
+                return `节点${i + 1} (ID: ${node.node_id}${dpInfo}${batchInfo}${batchCountInfo}, Time: ${formatTime(node.timestamp)}):\n${extraLines ? `${extraLines}\n` : ''}${options}`;
             }).join('\n\n')
             : "无关键决策节点";
 
