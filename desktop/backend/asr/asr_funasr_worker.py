@@ -14,6 +14,7 @@ FunASR 2-Pass Worker: 基于 funasr_onnx 的流式/离线混合语音识别
 
 import json
 import os
+import platform
 import sys
 import time
 import traceback
@@ -92,6 +93,111 @@ SILENCE_BUFFER_KEEP = 2  # 保留多少个静音块让音频更自然
 # 分句配置
 SENTENCE_END_PUNCTUATION = set("。！？!?.；;")
 MIN_SENTENCE_CHARS = int(os.environ.get("MIN_SENTENCE_CHARS", "2"))
+
+# 推理设备选择（影响本地 FunASR ONNX 模型：VAD/Online/Offline/Punc）
+# - auto: 自动选择（优先 CUDA，其次 ROCm，其次 DirectML，最后 CPU）
+# - cpu/cuda/rocm/dml: 强制指定
+ASR_DEVICE = os.environ.get("ASR_DEVICE", "auto").strip().lower()
+ASR_DEVICE_ID = int(os.environ.get("ASR_DEVICE_ID", "0"))
+
+
+@dataclass
+class GPUConfig:
+    """
+    兼容历史测试脚本的 GPU 配置对象。
+
+    - device_type: cpu/cuda/rocm/dml
+    - provider_name: onnxruntime provider 名称（如 DmlExecutionProvider）
+    - available: 是否启用 GPU
+    - device_id: GPU 设备 id（CPU 时为 -1）
+    - providers: 可用 providers 列表（调试用）
+    """
+
+    device_type: str = "cpu"
+    provider_name: str = "CPUExecutionProvider"
+    available: bool = False
+    device_id: int = -1
+    providers: List[str] = field(default_factory=list)
+
+
+def detect_onnx_device() -> dict:
+    """
+    检测 onnxruntime 可用 provider，并选择推理设备。
+
+    说明：
+    - funasr_onnx 的模型构造函数一般通过 device_id 控制：-1 为 CPU；>=0 尝试使用 GPU。
+    - 实际走哪种 GPU 取决于安装的 onnxruntime 版本提供的 provider：
+      * CUDAExecutionProvider (onnxruntime-gpu) -> NVIDIA
+      * ROCMExecutionProvider (onnxruntime-rocm) -> AMD/ROCm
+      * DmlExecutionProvider (onnxruntime-directml) -> Windows 上 AMD/NVIDIA/Intel
+    """
+    forced = ASR_DEVICE
+    device_id = ASR_DEVICE_ID
+
+    try:
+        import onnxruntime as ort  # type: ignore
+
+        providers = ort.get_available_providers() or []
+    except Exception:
+        providers = []
+
+    providers_set = {p.lower(): p for p in providers}
+    has_cuda = "cudaexecutionprovider" in providers_set
+    has_rocm = "rocmexecutionprovider" in providers_set
+    has_dml = "dmlexecutionprovider" in providers_set
+
+    def _cpu():
+        return {
+            "device": "cpu",
+            "device_id": -1,
+            "provider": "CPUExecutionProvider",
+            "providers": providers,
+        }
+
+    def _gpu(provider_key: str, device: str):
+        return {
+            "device": device,
+            "device_id": device_id,
+            "provider": providers_set.get(provider_key, provider_key),
+            "providers": providers,
+        }
+
+    if forced in ("cpu", "none", "off", "-1"):
+        return _cpu()
+    if forced in ("cuda", "nvidia"):
+        return _gpu("cudaexecutionprovider", "cuda") if has_cuda else _cpu()
+    if forced in ("rocm", "amd"):
+        return _gpu("rocmexecutionprovider", "rocm") if has_rocm else _cpu()
+    if forced in ("dml", "directml"):
+        return _gpu("dmlexecutionprovider", "dml") if has_dml else _cpu()
+
+    # auto：按优先级选择（CUDA > ROCm > DirectML > CPU）
+    if has_cuda:
+        return _gpu("cudaexecutionprovider", "cuda")
+    if has_rocm:
+        return _gpu("rocmexecutionprovider", "rocm")
+    if has_dml:
+        return _gpu("dmlexecutionprovider", "dml")
+    return _cpu()
+
+
+def detect_gpu() -> GPUConfig:
+    """
+    兼容接口：返回 GPUConfig，供 test_funasr_gpu.py 等脚本调用。
+    """
+    info = detect_onnx_device()
+    device = str(info.get("device", "cpu"))
+    device_id = int(info.get("device_id", -1))
+    provider = str(info.get("provider", "CPUExecutionProvider"))
+    providers = list(info.get("providers") or [])
+    available = device_id >= 0 and provider != "CPUExecutionProvider"
+    return GPUConfig(
+        device_type=device,
+        provider_name=provider,
+        available=available,
+        device_id=device_id,
+        providers=providers,
+    )
 
 
 def smart_concat(history: str, new_text: str) -> str:
@@ -240,7 +346,7 @@ def resolve_local_model_path(model_id: str) -> Optional[str]:
     return None
 
 
-def load_funasr_onnx_models():
+def load_funasr_onnx_models(gpu_config: Optional[GPUConfig] = None):
     """
     加载 funasr_onnx 模型 (VAD + 流式ASR + 离线ASR + 标点)
     
@@ -265,6 +371,19 @@ def load_funasr_onnx_models():
     # 读取模型配置
     model_id = os.environ.get("ASR_MODEL", "funasr-paraformer")
     is_large = "large" in model_id.lower()
+
+    device_info = detect_onnx_device()
+    if gpu_config is not None:
+        # 兼容：允许外部显式传入 device_id（例如 test_funasr_gpu.py）
+        try:
+            device_info = {
+                "device": getattr(gpu_config, "device_type", "cpu"),
+                "device_id": int(getattr(gpu_config, "device_id", -1)),
+                "provider": getattr(gpu_config, "provider_name", "CPUExecutionProvider"),
+                "providers": list(getattr(gpu_config, "providers", []) or []),
+            }
+        except Exception:
+            device_info = detect_onnx_device()
     
     # Large 版本默认不使用量化，精度更高
     quantize_env = os.environ.get("ASR_QUANTIZE", "").lower()
@@ -280,6 +399,13 @@ def load_funasr_onnx_models():
     sys.stderr.write(f"[FunASR Worker] Is Large model: {is_large}\n")
     sys.stderr.write(f"[FunASR Worker] Use Quantize: {use_quantize}\n")
     sys.stderr.write(f"[FunASR Worker] Offline mode: {OFFLINE_MODE}\n")
+    sys.stderr.write(f"[FunASR Worker] Host: {platform.system()} {platform.release()} ({platform.machine()})\n")
+    sys.stderr.write(f"[FunASR Worker] ASR_DEVICE={ASR_DEVICE}, ASR_DEVICE_ID={ASR_DEVICE_ID}\n")
+    sys.stderr.write(f"[FunASR Worker] ONNX Runtime providers: {device_info.get('providers')}\n")
+    sys.stderr.write(
+        "[FunASR Worker] Inference device selection: "
+        f"device={device_info.get('device')}, device_id={device_info.get('device_id')}, provider={device_info.get('provider')}\n"
+    )
     sys.stderr.write(f"[FunASR Worker] Preset size hint: {'~0.76GB INT8 (default)' if use_quantize else '~2.1GB FP32 (higher accuracy)'}\n")
     if OFFLINE_MODE:
         sys.stderr.write("[FunASR Worker] Loading ONNX models from local cache (offline mode)...\n")
@@ -305,47 +431,131 @@ def load_funasr_onnx_models():
         "FUNASR_PUNC_MODEL",
         "damo/punc_ct-transformer_zh-cn-common-vocab272727-onnx"
     )
-    
-    # 离线模式下，尝试解析本地路径
-    vad_model_dir = resolve_local_model_path(vad_model_id) or vad_model_id
-    online_model_dir = resolve_local_model_path(online_model_id) or online_model_id
-    offline_model_dir = resolve_local_model_path(offline_model_id) or offline_model_id
-    punc_model_dir = resolve_local_model_path(punc_model_id) or punc_model_id
+
+    def _normalize_model_id(value: str, label: str) -> str:
+        """
+        兼容历史/外部配置：有些环境可能会把 FUNASR_* 变量设置为本地缓存目录路径，
+        但 funasr_onnx 内部会将该值传给 funasr.AutoModel(model=...)。
+        AutoModel 需要 registry 模型 ID（如 "damo/xxx"），而不是 "C:\\...\\damo\\xxx"。
+        """
+        if not value:
+            return value
+
+        # 已经是 registry 形式
+        if "/" in value and not (":" in value or value.startswith("\\") or value.startswith("/")):
+            return value
+
+        # 如果是本地路径（win/mac/linux），尝试从路径中提取 "org/model"
+        try:
+            norm = os.path.normpath(value)
+            parts = [p for p in norm.split(os.sep) if p]
+            # 常见结构: .../hub/models/damo/<model>  或 .../hub/damo/<model>
+            if "models" in parts:
+                idx = parts.index("models")
+                if idx + 2 < len(parts):
+                    org = parts[idx + 1]
+                    model = parts[idx + 2]
+                    inferred = f"{org}/{model}"
+                    sys.stderr.write(f"[FunASR Worker] Normalized {label} from local path to model id: {inferred}\n")
+                    sys.stderr.flush()
+                    return inferred
+            # 兜底：直接在路径中找 "damo/<model>"
+            if "damo" in parts:
+                idx = parts.index("damo")
+                if idx + 1 < len(parts):
+                    inferred = f"damo/{parts[idx + 1]}"
+                    sys.stderr.write(f"[FunASR Worker] Normalized {label} from local path to model id: {inferred}\n")
+                    sys.stderr.flush()
+                    return inferred
+        except Exception:
+            pass
+
+        # 无法识别时原样返回（让后续报错更明确）
+        return value
+
+    vad_model_id = _normalize_model_id(vad_model_id, "VAD")
+    online_model_id = _normalize_model_id(online_model_id, "Streaming ASR (Pass 1)")
+    offline_model_id = _normalize_model_id(offline_model_id, "Offline ASR (Pass 2)")
+    punc_model_id = _normalize_model_id(punc_model_id, "Punctuation")
+
+    def _ensure_cached(model_id: str, label: str) -> Optional[str]:
+        """
+        离线模式下仅用于校验本地缓存是否存在，并返回找到的目录路径（用于日志/提示）。
+
+        重要：funasr_onnx 内部会将 model_dir 传给 funasr.AutoModel，
+        这里必须传 registry 模型 ID（如 "damo/xxx"），不能传本地目录路径，
+        否则会触发 AutoModel 的 "is not registered" 断言错误。
+        """
+        if not OFFLINE_MODE:
+            return None
+        found = resolve_local_model_path(model_id)
+        if not found:
+            raise RuntimeError(
+                f"Offline mode enabled (MODELSCOPE_OFFLINE=1) but required {label} model is not cached: {model_id}. "
+                f"Please download the model first, or disable offline mode."
+            )
+        return found
+
+    # 离线模式：只校验缓存是否存在（不把本地路径传给 funasr_onnx）
+    vad_cached = _ensure_cached(vad_model_id, "VAD")
+    online_cached = _ensure_cached(online_model_id, "Streaming ASR (Pass 1)")
+    offline_cached = _ensure_cached(offline_model_id, "Offline ASR (Pass 2)")
+    punc_cached = _ensure_cached(punc_model_id, "Punctuation")
 
     # 1. VAD 模型: 检测语音活动
-    sys.stderr.write(f"[FunASR Worker] Loading VAD model: {vad_model_dir}...\n")
+    sys.stderr.write(
+        f"[FunASR Worker] Loading VAD model: {vad_model_id}"
+        + (f" (cached at {vad_cached})" if vad_cached else "")
+        + "...\n"
+    )
     sys.stderr.flush()
     vad_model = Fsmn_vad(
-        model_dir=vad_model_dir,
-        quantize=use_quantize
+        model_dir=vad_model_id,
+        quantize=use_quantize,
+        device_id=int(device_info.get("device_id", -1)),
     )
 
     # 2. Pass 1 流式模型: 快速出字
-    sys.stderr.write(f"[FunASR Worker] Loading streaming ASR model (Pass 1): {online_model_dir}...\n")
+    sys.stderr.write(
+        f"[FunASR Worker] Loading streaming ASR model (Pass 1): {online_model_id}"
+        + (f" (cached at {online_cached})" if online_cached else "")
+        + "...\n"
+    )
     sys.stderr.flush()
     asr_online_model = ParaformerOnline(
-        model_dir=online_model_dir,
+        model_dir=online_model_id,
         batch_size=1,
+        device_id=int(device_info.get("device_id", -1)),
         quantize=use_quantize,
         intra_op_num_threads=4
     )
 
     # 3. Pass 2 非流式模型: 高精度识别
-    sys.stderr.write(f"[FunASR Worker] Loading offline ASR model (Pass 2): {offline_model_dir}...\n")
+    sys.stderr.write(
+        f"[FunASR Worker] Loading offline ASR model (Pass 2): {offline_model_id}"
+        + (f" (cached at {offline_cached})" if offline_cached else "")
+        + "...\n"
+    )
     sys.stderr.flush()
     asr_offline_model = ParaformerOffline(
-        model_dir=offline_model_dir,
+        model_dir=offline_model_id,
         batch_size=1,
+        device_id=int(device_info.get("device_id", -1)),
         quantize=use_quantize,
         intra_op_num_threads=4
     )
 
     # 4. 标点模型: 给 Pass 2 结果加标点
-    sys.stderr.write(f"[FunASR Worker] Loading punctuation model: {punc_model_dir}...\n")
+    sys.stderr.write(
+        f"[FunASR Worker] Loading punctuation model: {punc_model_id}"
+        + (f" (cached at {punc_cached})" if punc_cached else "")
+        + "...\n"
+    )
     sys.stderr.flush()
     punc_model = CT_Transformer(
-        model_dir=punc_model_dir,
+        model_dir=punc_model_id,
         quantize=use_quantize,
+        device_id=int(device_info.get("device_id", -1)),
         intra_op_num_threads=2
     )
 

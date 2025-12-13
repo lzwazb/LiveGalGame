@@ -20,6 +20,7 @@ import concurrent.futures
 import io
 import json
 import os
+import platform
 import sys
 import time
 import traceback
@@ -66,6 +67,12 @@ PARALLEL_REQUESTS = int(os.environ.get("SF_PARALLEL_REQUESTS", "2"))  # 每段�
 # VAD 配置
 SILENCE_THRESHOLD_CHUNKS = int(os.environ.get("SF_SILENCE_CHUNKS", "2"))  # 降低到2，更快断句（原3）
 USE_FUNASR_VAD = os.environ.get("SF_USE_FUNASR_VAD", "1") in ("1", "true", "yes")
+
+# VAD 推理设备选择（仅影响本地 VAD；云端 SiliconFlow ASR 不受影响）
+# - auto: 自动选择（优先 CUDA，其次 ROCm，其次 DirectML，最后 CPU）
+# - cpu/cuda/rocm/dml: 强制指定
+SF_VAD_DEVICE = os.environ.get("SF_VAD_DEVICE", "auto").strip().lower()
+SF_VAD_DEVICE_ID = int(os.environ.get("SF_VAD_DEVICE_ID", "0"))
 
 MIN_SENT_CHARS = 2
 SENTENCE_END_PUNCT = set("。！？!?.；;")
@@ -141,6 +148,7 @@ class SiliconFlowWorker:
         self.sessions: Dict[str, SessionState] = {}
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
         self.vad_model = None
+        self._vad_device_info = {"device": "cpu", "device_id": -1, "provider": "CPUExecutionProvider", "providers": []}
 
         # 加载轻量级 VAD 模型
         if USE_FUNASR_VAD:
@@ -149,18 +157,103 @@ class SiliconFlowWorker:
         sys.stderr.write(f"[SF Worker] Parallel Redundant Mode\n")
         sys.stderr.write(f"[SF Worker] - Model: {MODEL_NAME}\n")
         sys.stderr.write(f"[SF Worker] - Parallel requests: {PARALLEL_REQUESTS}\n")
-        sys.stderr.write(f"[SF Worker] - VAD: {'FunASR FSMN-VAD' if self.vad_model else 'Simple RMS'}\n")
+        if self.vad_model:
+            sys.stderr.write(
+                "[SF Worker] - VAD: FunASR FSMN-VAD"
+                f" (device={self._vad_device_info.get('device')}, device_id={self._vad_device_info.get('device_id')}, "
+                f"provider={self._vad_device_info.get('provider')})\n"
+            )
+        else:
+            sys.stderr.write(f"[SF Worker] - VAD: Simple RMS\n")
         sys.stderr.write(f"[SF Worker] - Max buffer: {MAX_BUFFER_SEC}s\n")
         sys.stderr.flush()
+
+    def _detect_onnx_vad_device(self) -> dict:
+        """
+        自动检测 onnxruntime 可用的执行后端，并选择 VAD 使用的设备。
+
+        注意：
+        - 这里只能控制「本地 VAD」的推理设备；SiliconFlow 云端 ASR 不会使用本机 GPU。
+        - funasr_onnx 的 Fsmn_vad 接口通常通过 device_id 控制是否走 GPU（>=0）或 CPU（-1）。
+        - Provider 选择受安装的 onnxruntime 版本影响：
+          * NVIDIA：onnxruntime-gpu -> CUDAExecutionProvider
+          * AMD/Win：onnxruntime-directml -> DmlExecutionProvider（适配 A/N/Intel）
+          * AMD/Linux：onnxruntime-rocm -> ROCMExecutionProvider
+        """
+        forced = SF_VAD_DEVICE
+        device_id = SF_VAD_DEVICE_ID
+
+        try:
+            import onnxruntime as ort  # type: ignore
+
+            providers = ort.get_available_providers() or []
+        except Exception:
+            providers = []
+
+        providers_set = {p.lower(): p for p in providers}
+        has_cuda = "cudaexecutionprovider" in providers_set
+        has_rocm = "rocmexecutionprovider" in providers_set
+        has_dml = "dmlexecutionprovider" in providers_set
+
+        def _cpu():
+            return {
+                "device": "cpu",
+                "device_id": -1,
+                "provider": "CPUExecutionProvider",
+                "providers": providers,
+            }
+
+        def _gpu(provider_key: str, device: str):
+            return {
+                "device": device,
+                "device_id": device_id,
+                "provider": providers_set.get(provider_key, provider_key),
+                "providers": providers,
+            }
+
+        # 强制模式
+        if forced in ("cpu", "none", "off", "-1"):
+            return _cpu()
+        if forced in ("cuda", "nvidia"):
+            return _gpu("cudaexecutionprovider", "cuda") if has_cuda else _cpu()
+        if forced in ("rocm", "amd"):
+            return _gpu("rocmexecutionprovider", "rocm") if has_rocm else _cpu()
+        if forced in ("dml", "directml"):
+            return _gpu("dmlexecutionprovider", "dml") if has_dml else _cpu()
+
+        # auto：按优先级选择（CUDA > ROCm > DirectML > CPU）
+        if has_cuda:
+            return _gpu("cudaexecutionprovider", "cuda")
+        if has_rocm:
+            return _gpu("rocmexecutionprovider", "rocm")
+        # Windows 下 AMD/NVIDIA 通常走 DirectML
+        if has_dml:
+            return _gpu("dmlexecutionprovider", "dml")
+        return _cpu()
 
     def _load_vad_model(self):
         """加载 FunASR 轻量级 VAD 模型（约 100MB，比完整 ASR 模型小得多）"""
         try:
             from funasr_onnx.vad_bin import Fsmn_vad
             vad_model_id = "damo/speech_fsmn_vad_zh-cn-16k-common-onnx"
-            sys.stderr.write(f"[SF Worker] Loading VAD model: {vad_model_id}...\n")
+
+            self._vad_device_info = self._detect_onnx_vad_device()
+            sys.stderr.write(f"[SF Worker] Host: {platform.system()} {platform.release()} ({platform.machine()})\n")
+            sys.stderr.write(f"[SF Worker] SF_VAD_DEVICE={SF_VAD_DEVICE}, SF_VAD_DEVICE_ID={SF_VAD_DEVICE_ID}\n")
+            sys.stderr.write(f"[SF Worker] ONNX Runtime providers: {self._vad_device_info.get('providers')}\n")
+            sys.stderr.write(
+                f"[SF Worker] Loading VAD model: {vad_model_id} "
+                f"(device={self._vad_device_info.get('device')}, device_id={self._vad_device_info.get('device_id')}, "
+                f"provider={self._vad_device_info.get('provider')})...\n"
+            )
             sys.stderr.flush()
-            self.vad_model = Fsmn_vad(model_dir=vad_model_id, quantize=True)
+
+            # funasr_onnx：device_id=-1 表示 CPU；>=0 尝试使用 GPU（由安装的 onnxruntime provider 决定）
+            self.vad_model = Fsmn_vad(
+                model_dir=vad_model_id,
+                quantize=True,
+                device_id=int(self._vad_device_info.get("device_id", -1)),
+            )
             sys.stderr.write("[SF Worker] VAD model loaded successfully!\n")
             sys.stderr.flush()
         except Exception as e:
