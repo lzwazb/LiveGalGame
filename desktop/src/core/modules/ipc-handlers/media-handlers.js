@@ -1,4 +1,4 @@
-import { ipcMain, systemPreferences } from 'electron';
+import { ipcMain, systemPreferences, desktopCapturer } from 'electron';
 
 /**
  * 注册媒体权限相关 IPC 处理器
@@ -63,6 +63,20 @@ export function registerMediaHandlers() {
     }
   });
 
+  // DesktopCapturer sources (返回可序列化的字段，避免 NativeImage 无法通过 IPC 传输)
+  ipcMain.handle('get-desktop-sources', async (event, options = {}) => {
+    try {
+      const sources = await desktopCapturer.getSources(options);
+      return sources.map((source) => ({
+        id: source.id,
+        name: source.name,
+        display_id: source.display_id || null
+      }));
+    } catch (error) {
+      console.error('Error getting desktop sources:', error);
+      return [];
+    }
+  });
+
   console.log('Media Permission IPC handlers registered');
 }
-

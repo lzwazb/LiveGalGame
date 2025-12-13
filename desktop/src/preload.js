@@ -11,6 +11,85 @@ const logger = {
   debug: console.debug.bind(console)
 };
 
+// 由于我们在 `on/once` 中会包一层 listener 来去掉 event 参数，
+// 这里维护一个映射，确保 `removeListener` 可以正确移除（避免监听器泄漏/重复触发）
+const listenerRegistry = new Map(); // channel -> Map(originalCallback -> wrappedCallback)
+
+function getChannelRegistry(channel) {
+  if (!listenerRegistry.has(channel)) {
+    listenerRegistry.set(channel, new Map());
+  }
+  return listenerRegistry.get(channel);
+}
+
+function registerWrappedListener(channel, callback, { once = false } = {}) {
+  if (typeof channel !== 'string' || typeof callback !== 'function') {
+    return () => { };
+  }
+
+  const channelMap = getChannelRegistry(channel);
+  const existing = channelMap.get(callback);
+  if (existing) {
+    try {
+      ipcRenderer.removeListener(channel, existing);
+    } catch {
+      // ignore
+    }
+  }
+
+  const wrapped = (event, ...args) => {
+    try {
+      callback(...args);
+    } finally {
+      // once 的 listener 触发后会自动移除，但我们也要清理映射
+      if (once) {
+        channelMap.delete(callback);
+      }
+    }
+  };
+
+  channelMap.set(callback, wrapped);
+  if (once) {
+    ipcRenderer.once(channel, wrapped);
+  } else {
+    ipcRenderer.on(channel, wrapped);
+  }
+
+  return () => {
+    try {
+      const stored = channelMap.get(callback);
+      if (!stored) return;
+      ipcRenderer.removeListener(channel, stored);
+      channelMap.delete(callback);
+    } catch {
+      // ignore
+    }
+  };
+}
+
+function removeWrappedListener(channel, callback) {
+  if (typeof channel !== 'string' || typeof callback !== 'function') {
+    return;
+  }
+  const channelMap = listenerRegistry.get(channel);
+  const stored = channelMap?.get(callback);
+  if (stored) {
+    try {
+      ipcRenderer.removeListener(channel, stored);
+    } catch {
+      // ignore
+    }
+    channelMap.delete(callback);
+    return;
+  }
+  // 兼容：如果外部传入的就是原生 listener
+  try {
+    ipcRenderer.removeListener(channel, callback);
+  } catch {
+    // ignore
+  }
+}
+
 // 暴露安全的API给渲染进程
 contextBridge.exposeInMainWorld('electronAPI', {
   // 平台信息
@@ -22,9 +101,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // IPC通信
   send: (channel, data) => ipcRenderer.send(channel, data),
-  on: (channel, callback) => ipcRenderer.on(channel, (event, ...args) => callback(...args)),
-  once: (channel, callback) => ipcRenderer.once(channel, (event, ...args) => callback(...args)),
-  removeListener: (channel, callback) => ipcRenderer.removeListener(channel, callback),
+  on: (channel, callback) => registerWrappedListener(channel, callback, { once: false }),
+  once: (channel, callback) => registerWrappedListener(channel, callback, { once: true }),
+  removeListener: (channel, callback) => removeWrappedListener(channel, callback),
 
   // 日志
   log: (message) => ipcRenderer.send('log', message),

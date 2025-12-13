@@ -8,6 +8,16 @@ import electron from 'electron';
  * @param {Function} deps.checkASRReady
  */
 export function registerWindowHandlers({ windowManager, checkASRReady }) {
+  // 渲染进程日志转发（可选）
+  ipcMain.on('log', (_event, message) => {
+    try {
+      if (message === undefined) return;
+      console.log('[RendererLog]', message);
+    } catch {
+      // ignore
+    }
+  });
+
   // 显示 HUD
   ipcMain.on('show-hud', async () => {
     // 如果正在创建，弹一次提示，避免用户频繁点击
@@ -16,7 +26,7 @@ export function registerWindowHandlers({ windowManager, checkASRReady }) {
         windowManager.hudCreateNotified = true;
         const parent = windowManager.getMainWindow();
         const message = 'ASR 模型正在加载，可能需要十几秒，请稍等片刻，无需重复点击。';
-        ipcMain.emit('log', message);
+        console.log('[HUD]', message);
         const dialogOpts = {
           type: 'info',
           buttons: ['好的'],
