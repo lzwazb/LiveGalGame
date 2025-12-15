@@ -42,7 +42,16 @@ const entryFile = path.join(backendDir, 'main.py');
 const isWin = process.platform === 'win32';
 
 function run(cmd) {
-  execSync(cmd, { stdio: 'inherit', cwd: projectRoot });
+  execSync(cmd, {
+    stdio: 'inherit',
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      // 解决 macOS 上 PyInstaller 分析 torch 时 OpenMP 库冲突问题
+      // OMP: Error #15: Initializing libomp.dylib, but found libomp.dylib already initialized.
+      KMP_DUPLICATE_LIB_OK: 'TRUE',
+    },
+  });
 }
 
 function ensureDirs() {
