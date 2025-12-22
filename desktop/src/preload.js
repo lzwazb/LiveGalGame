@@ -237,6 +237,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   asrConvertToMessage: (recordId, conversationId) => ipcRenderer.invoke('asr-convert-to-message', recordId, conversationId),
   asrCleanupAudioFiles: (retentionDays) => ipcRenderer.invoke('asr-cleanup-audio-files', retentionDays),
   asrReloadModel: () => ipcRenderer.invoke('asr-reload-model'),
+  // 模型缓存目录（HF / ModelScope）配置
+  appGetModelCachePaths: () => ipcRenderer.invoke('app-get-model-cache-paths'),
+  appSelectDirectory: (options) => ipcRenderer.invoke('app-select-directory', options),
+  appSetAsrCacheBase: (cacheBase) => ipcRenderer.invoke('app-set-asr-cache-base', cacheBase),
   onAsrModelDownloadStarted: (callback) => {
     const listener = (event, payload) => callback(payload);
     ipcRenderer.on('asr-model-download-started', listener);
