@@ -215,6 +215,46 @@ export function registerASRAudioHandlers({
     }
   });
 
+  ipcMain.handle('asr-get-audio-data-url', async (event, filePath) => {
+    try {
+      if (!filePath) return null;
+      const fs = await import('fs/promises');
+      const buffer = await fs.readFile(filePath);
+      const base64 = buffer.toString('base64');
+      // Assume WAV for simplicity, or detect from extension
+      const ext = filePath.split('.').pop().toLowerCase();
+      const mimeType = ext === 'webm' ? 'audio/webm' : 'audio/wav';
+      return `data:${mimeType};base64,${base64}`;
+    } catch (error) {
+      console.error('Error reading audio file:', error);
+      return null;
+    }
+  });
+
+  ipcMain.handle('asr-delete-audio-file', async (event, { recordId, filePath }) => {
+    try {
+      const asrManager = getOrCreateASRManager();
+
+      // Delete physical file
+      if (filePath) {
+        const fs = await import('fs/promises');
+        await fs.unlink(filePath).catch(err => {
+          console.warn('Physical file already gone or could not be deleted:', err);
+        });
+      }
+
+      // Update database
+      if (recordId) {
+        db.deleteSpeechRecordAudio(recordId);
+      }
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error deleting audio file:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
   console.log('ASR Audio IPC handlers registered');
 }
 

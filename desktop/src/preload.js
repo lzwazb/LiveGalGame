@@ -236,6 +236,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   asrGetSpeechRecords: (conversationId) => ipcRenderer.invoke('asr-get-speech-records', conversationId),
   asrConvertToMessage: (recordId, conversationId) => ipcRenderer.invoke('asr-convert-to-message', recordId, conversationId),
   asrCleanupAudioFiles: (retentionDays) => ipcRenderer.invoke('asr-cleanup-audio-files', retentionDays),
+  asrGetAudioDataUrl: (filePath) => ipcRenderer.invoke('asr-get-audio-data-url', filePath),
+  asrDeleteAudioFile: (payload) => ipcRenderer.invoke('asr-delete-audio-file', payload),
   asrReloadModel: () => ipcRenderer.invoke('asr-reload-model'),
   onAsrModelDownloadStarted: (callback) => {
     const listener = (event, payload) => callback(payload);

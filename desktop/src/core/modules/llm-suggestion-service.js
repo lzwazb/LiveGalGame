@@ -136,6 +136,7 @@ export default class LLMSuggestionService {
       model: modelName,
       temperature: trigger === 'manual' ? 0.8 : 0.6,
       max_tokens: 4096,
+      reasoning_effort: "disabled", // 禁用推理（建议生成不需要推理）
       stream: true,
       messages: [
         {
@@ -765,6 +766,7 @@ export default class LLMSuggestionService {
       model: modelName,
       temperature: 0,
       max_tokens: 120,
+      reasoning_effort: "disabled", // 禁用推理（情境检测不需要推理）
       stream: true,
       messages: [
         {

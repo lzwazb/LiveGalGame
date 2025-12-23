@@ -8,11 +8,11 @@ export default class ReviewService {
         this.currentLLMFeature = 'review';
 
         // 复盘输入规模控制（避免超长对话导致上下文爆炸）
-        this.MAX_NODES = 15;
-        this.MAX_MESSAGES = 120;
+        this.MAX_NODES = 999; // 移除限制
+        this.MAX_MESSAGES = 99999; // 移除限制
         this.MAX_OPTIONS_PER_NODE = 6;
         // 粗略 token 上限（经验值）：超出会触发更激进裁剪
-        this.MAX_PROMPT_TOKENS_EST = 12000;
+        this.MAX_PROMPT_TOKENS_EST = 180000; // 按 200k 来，留一些 buffer
     }
 
     get db() {
@@ -128,9 +128,10 @@ export default class ReviewService {
             }
         }
 
-        // 5. 补充 ghost_options
-        report('enrich', 0.82, '补齐未选择路径（ghost options）...');
+        // 5. 补充 ghost_options 和 录音关联
+        report('enrich', 0.82, '补齐未选择路径与录音关联...');
         this.enrichGhostOptions(reviewData, nodes);
+        this.enrichAudioInfo(reviewData, conversationId);
 
         // 6. 校验/兜底
         report('validate', 0.86, '校验并兜底复盘结构...');
@@ -395,58 +396,89 @@ export default class ReviewService {
             }).join('\n\n')
             : "无关键决策节点";
 
-        return `
-# Role
-你是恋爱对话复盘分析师。
+        const sections = [
+            "# Role",
+            "你是恋爱对话复盘分析师，擅长细腻地洞察人际互动的关键动态。",
+            "",
+            "# Task",
+            nodes.length > 0
+                ? '根据对话记录和已知的"关键决策点"（系统当时生成建议的时刻），分析用户的实际选择，并生成优雅、专业的复盘总结。'
+                : '根据对话记录，总结对话内容并评估好感度变化。',
+            "",
+            "## 节点判定规则（重要）：",
+            "**必须分析的节点**：已提供的决策点（带有系统建议的时刻）必须全部分析。",
+            "**可额外生成的节点**：在对话中识别以下关键时刻，作为额外的 insight 节点：",
+            "1. **话题转折点**：对话主题/情绪发生明显变化的时刻",
+            "2. **情感峰值点**：最感动/最尴尬/最有趣的时刻",
+            "3. **关系里程碑**：关系推进的关键点（如首次称呼昵称、主动示好等）",
+            "4. **冲突/和解点**：意见不合或和解的时刻",
+            "",
+            "## 复盘核心元素：",
+            "1. **决策点标题 (title)**：用极简的词汇（2-4字）概括该次互动的本质，如\"破冰契机\"、\"情绪共振\"、\"婉转拒绝\"。不要包含数字或符号。",
+            "2. **用户行为描述 (user_desc)**：用一句话（10-20字）精准描述用户做了什么。",
+            "   - **Bad**: \"用户回复了'好的'，表示同意\"",
+            "   - **Good**: \"积极响应邀请，展现出极高的社交主动性\"",
+            "3. **选择类型 (choice_type)**：",
+            "   - **matched**：用户选择了系统建议的选项",
+            "   - **custom**：用户在决策点使用了自定义回复",
+            "   - **insight**：非决策点的关键时刻（话题转折/情感峰值等），此类节点 matched_id 为空",
+            "4. **整体表现评价 (self_evaluation)**：作为第一人称视高的教练，给用户一段富有启发性的反馈（20-40字）。",
+            "",
+            "## 其他内容：",
+            "- **标题 (title)**：为本次对话生成一个富有文学美感的标题，如\"月色下的温柔守候\"、\"初见时的微小悸动\"。",
+            "- **对话标签 (tags)**：生成3-5个高阶感性标签，如：双向奔赴、微妙暧昧、情感防御、深度共情。",
+            "- **对话概要 (conversation_summary)**：一句话概括故事走向。",
+            "- **好感度变化 (total_affinity_change)**：-10 到 +10 的整数。",
+            "",
+            "# Input",
+            "",
+            "## 对话记录",
+            transcript,
+            "",
+            "## 决策点及建议选项",
+            nodeInfo,
+            "",
+            "# Output (TOON 格式)",
+            "请严格遵守以下格式，只需输出 Data 行。",
+            "",
+            "**输出示例**：",
+            "review_node: node_1,情感共鸣,matched,sugg-xxx-1A,1.0,表达对回忆的珍视,用户选择了温情回复",
+            "review_node: node_2,话题转折,insight,,0.9,主动提起工作话题,从轻松闲聊转向深度讨论",
+            "review_node: node_3,关心表达,custom,,0.8,担忧对方状态,没有采纳建议而是自由发挥",
+            "",
+            "",
+            "review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluation,chat_overview,expression_score,expression_desc,topic_score,topic_desc,tags,attitude_analysis}:",
+            "3,月色下的守候,本次对话从尴尬破冰到温馨互动,展现了极强的同理心,...,8,表达清晰,7,话题自然,双向奔赴;微妙暧昧,对方对你产生了好感",
+            ""
+        ];
 
-# Task
-${nodes.length > 0 ? '根据对话记录和已知的"关键节点"（系统当时生成选项的时刻），判断用户实际选择了什么，并总结对话。' : '根据对话记录，总结对话内容并评估好感度变化。'}
-补充以下内容：
-1. 用户表现评价：对用户在本次对话中的表现做详细评价，包括：
-   - 表述能力评分（0-100分）和一句话评价（10~30字）
-   - 话题选择评分（0-100分）和一句话评价（10~30字）
-2. 标题与概要：
-   - 为本次对话生成一个标题（title），6-15字，吸引人且概括核心内容。
-   - 用1-2句话概述对话主题/走向（conversation_summary），适合直接展示给用户。
-   - 整体表现评价（10~40字）
-3. 对话标签（Tag）：生成3-5个简短的标签（如：破冰、分享、幽默、关心），概括对话特点。
-4. 对象态度分析：详细分析对象对用户的好感度变化和态度倾向（20~50字）。
+        if (nodes.length > 0) {
+            const minNodes = Math.max(nodes.length, Math.ceil(messages.length / 50));
+            sections.push(
+                "第一部分：节点分析",
+                `请分析 ${nodes.length} 个已知决策点，并额外识别 insight 节点（话题转折/情感峰值等）。共约 ${minNodes} 个以上节点。`,
+                `请分析 ${nodes.length} 个已知决策点，并额外识别 insight 节点（话题转折/情感峰值等）。共约 ${minNodes} 个以上节点。`,
+                "review_node: <node_id>,<极简标题>,<matched/custom/insight>,<matched_id>,<置信度>,<精准行为描述>,<深度原因分析>",
+                "",
+                "**注意**：每个节点必须单独一行，以 `review_node:` 开头。node_id 格式为 node_1, node_2...。",
+                "",
+                "第二部分：整体总结"
+            );
+        } else {
+            sections.push("第一部分：整体总结");
+        }
 
-# Input
+        sections.push(
+            "review_summary: <好感度变化>,<美感标题>,<走向概述>,<启发性评价>,<对话概要>,<表述分>,<表释放评价>,<话题分>,<话题选择评价>,<分号分隔标签>,<对象态度分析>",
+            "",
+            "## 严禁行为：",
+            "- 禁止输出 markdown 代码块标记 (```)。",
+            "- 禁止省略引号（如果内容中包含逗号）。",
+            "- 必须在一行内写完一个节点的数据。",
+            "- 必须以 `review_node:` 或 `review_summary:` 开头。"
+        );
 
-## 对话记录
-${transcript}
-
-## 关键节点及当时的选项
-${nodeInfo}
-
-# Output (TOON 格式)
-输出分为两部分，请严格遵守格式，不要输出其他废话：
-
-${nodes.length > 0 ? `第一部分：节点分析（每行一个节点）
-review_nodes[${nodes.length}]{node_id,title,choice_type,matched_id,confidence,user_desc,reasoning}:
-<节点ID>,<标题>,<matched/custom>,<匹配ID>,<置信度0-1>,<用户行为描述>,<原因分析>
-
-第二部分：整体总结（单独一行）` : `第一部分：整体总结（单独一行）`}
-review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluation,chat_overview,expression_score,expression_desc,topic_score,topic_desc,tags,attitude_analysis}:
-<好感度变化整数>,<对话标题>,<对话整体概述>,<用户整体表现评价>,<对话概要>,<表述能力评分0-100>,<表述能力描述>,<话题选择评分0-100>,<话题选择描述>,<标签列表（分号分隔）>,<对象态度分析>
-
-# 规则
-${nodes.length > 0 ? `- choice_type: 如果用户的回复语义接近某选项 → matched，否则 → custom
-- confidence: 0.8+ 高度匹配，0.5-0.8 部分匹配，<0.5 归为 custom
-- matched_id: 仅 choice_type=matched 时填写选项ID
-- 节点数据行数必须与提供的节点数一致` : ''}
-- total_affinity_change: 整个会话的好感度变化，-10 到 +10 的整数
-- 字段用英文逗号分隔，如内容含逗号请用引号包裹
-
-# 示例
-${nodes.length > 0 ? `review_nodes[2]{node_id,title,choice_type,matched_id,confidence,user_desc,reasoning}:
-node_1,初次问候,matched,sugg_101,0.92,主动打招呼表达惊喜,积极社交建立好感
-node_2,深入交流,custom,,0.3,"聊了冰岛旅行和极光",独特故事引发兴趣
-review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluation,chat_overview,expression_score,expression_desc,topic_score,topic_desc,tags,attitude_analysis}:
-+16,浪漫极光之旅,整体对话轻松愉快，双方互有好感，关系稳步推进,整体回应礼貌主动，能跟随对方话题,围绕旅行经历展开分享，氛围轻松友好,85,表达自然流畅，用词恰当,88,话题选择合适，能引发共鸣,轻松;分享;共鸣;旅行,对方表现出浓厚的兴趣，主动分享个人经历，好感度有显著提升。` : `review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluation,chat_overview,expression_score,expression_desc,topic_score,topic_desc,tags,attitude_analysis}:
-+5,初次见面寒暄,双方进行了简单的日常寒暄，氛围和谐。,回复自然有礼，能给予积极反馈,聊了日常和兴趣，气氛温和友善。,82,表达自然有礼,85,话题选择合适,日常;寒暄;温和,对方态度友善，回应积极，但尚未深入交流，保持礼貌距离。`}
-`;
+        return sections.join('\\n');
     }
 
     async callLLMForReview(messages, nodes) {
@@ -460,8 +492,8 @@ review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluati
             completion = await client.chat.completions.create({
                 model: this.currentLLMConfig.model_name,
                 messages: [{ role: 'user', content: prompt }],
-                temperature: 0.2, // 分析类任务降低随机性
-                max_tokens: 2000,
+                max_tokens: 20000, // 按 200k context 来，给足输出空间
+                reasoning_effort: "high", // 启用推理过程（仅用于复盘）
                 stream: false
             });
         } catch (apiError) {
@@ -518,7 +550,7 @@ review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluati
                 nodes: []
             };
         }
-        const lines = text.split('\n').filter(l => l.trim());
+        const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
         const result = {
             version: "1.0",
@@ -527,81 +559,125 @@ review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluati
             nodes: []
         };
 
-        // 解析 summary
-        const summaryHeaderRegex = /^review_summary\[(\d+)\]\{([^}]+)\}:?/;
-        const summaryHeaderIndex = lines.findIndex(l => l.match(summaryHeaderRegex));
-        if (summaryHeaderIndex !== -1 && lines[summaryHeaderIndex + 1]) {
-            const headerMatch = lines[summaryHeaderIndex].match(summaryHeaderRegex);
-            const fields = headerMatch?.[2]?.split(',').map(f => f.trim()) || [];
-            const parts = this.csvSplit(lines[summaryHeaderIndex + 1]);
-            const summaryMap = {};
-            fields.forEach((field, idx) => {
-                summaryMap[field] = parts[idx] ?? '';
-            });
+        // 辅助函数：尝试从一行中提取定义和数据
+        const extractFromLine = (line, regex) => {
+            const match = line.match(regex);
+            if (!match) return null;
+            const contentInBraces = match[1]; // 第一个捕获组 (Fixed: match[2] -> match[1])
+            const suffix = line.substring(match[0].length).trim();
+            return { fieldsText: contentInBraces, suffix, match };
+        };
 
-            result.summary.total_affinity_change = parseInt(summaryMap.total_affinity_change) || 0;
-            result.summary.title = summaryMap.title || "";
-            // 优先 chat_overview 填充概要，其次 conversation_summary
-            result.summary.conversation_summary = summaryMap.conversation_summary || summaryMap.chat_overview || "";
-            result.summary.self_evaluation = summaryMap.self_evaluation || "";
-            result.summary.chat_overview = summaryMap.chat_overview || result.summary.conversation_summary;
-            // 解析用户表现评价的评分
-            result.summary.performance_evaluation = {
-                expression_ability: {
-                    score: parseInt(summaryMap.expression_score) || null,
-                    description: summaryMap.expression_desc || ""
-                },
-                topic_selection: {
-                    score: parseInt(summaryMap.topic_score) || null,
-                    description: summaryMap.topic_desc || ""
+        const summaryRegex = /^review_summary.*?[:\[\{](.+?)[:\]\}]?$/;
+        // 兼容旧格式 review_nodes 和新格式 review_node
+        const nodesRegex = /^(?:review_nodes|review_node).*?[:\[\{](.+?)[:\]\}]?$/;
+
+        // 1. 解析 Summary
+        const summaryIdx = lines.findIndex(l => l.match(summaryRegex));
+        if (summaryIdx !== -1) {
+            const info = extractFromLine(lines[summaryIdx], summaryRegex);
+
+            if (info && info.fieldsText) {
+                const fields = info.fieldsText.split(',').map(f => f.trim());
+
+                // 策略：如果后缀不为空，后缀即是数据；否则看下一行
+                let dataLine = info.suffix || lines[summaryIdx + 1] || "";
+
+                // 1. 如果当前行已经包含了数据，不用找下一行
+                if (!info.suffix && info.fieldsText && info.fieldsText.length > 10) {
+                    // 简单判断：如果 fieldsText 不要看起来像 header
+                    if (!info.fieldsText.includes('total_affinity_change') && (info.fieldsText.match(/,/g) || []).length >= 2) {
+                        dataLine = info.fieldsText;
+                    }
                 }
-            };
-            // 解析 Tags
-            result.summary.tags = (summaryMap.tags || "").split(/[;；]/).map(t => t.trim()).filter(Boolean);
-            // 解析对象态度分析
-            result.summary.attitude_analysis = summaryMap.attitude_analysis || "";
-        }
 
-        // 解析 nodes
-        const nodesHeaderRegex = /^review_nodes\[(\d+)\]\{([^}]+)\}:?/;
-        const headerLineIndex = lines.findIndex(l => l.match(nodesHeaderRegex));
+                // 如果数据行看起来像是定义/Header，则重置为空
+                if (dataLine.match(/^review_/) || dataLine.match(/^\[ReviewService\]/) || dataLine.includes('total_affinity_change')) dataLine = "";
 
-        if (headerLineIndex !== -1) {
-            // Assume subsequent lines are nodes until summary or end
-            // Note: The example shows summary comes AFTER nodes usually.
-            // Let's just iterate and try to match node IDs
+                if (dataLine) {
+                    const parts = this.csvSplit(dataLine);
+                    const summaryMap = {};
+                    const actualFields = ["total_affinity_change", "title", "conversation_summary", "self_evaluation", "chat_overview", "expression_score", "expression_desc", "topic_score", "topic_desc", "tags", "attitude_analysis"];
+                    actualFields.forEach((f, i) => summaryMap[f] = parts[i] || "");
 
-            let currentNodeIndex = 1;
-            for (let i = headerLineIndex + 1; i < lines.length; i++) {
-                const line = lines[i];
-                if (line.match(/^review_summary/)) break;
-                if (!line.includes(',')) continue; // Skip empty/weird lines
+                    // Save to result logic below...
 
-                const parts = this.csvSplit(line);
-                // node_id,title,choice_type,matched_id,confidence,user_desc,reasoning
-                if (parts.length >= 7) {
-                    const nodeId = parts[0]; // e.g., node_1
-                    const originalNode = originalNodes.find(n => n.node_id === nodeId);
-
-                    result.nodes.push({
-                        node_id: nodeId,
-                        node_title: parts[1],
-                        timestamp: originalNode ? originalNode.timestamp : 0,
-                        choice_type: parts[2] === 'matched' ? 'matched' : 'custom',
-                        matched_suggestion_id: parts[3] || null,
-                        match_confidence: parseFloat(parts[4]) || 0,
-                        user_description: parts[5],
-                        reasoning: parts[6],
-                        ghost_options: [] // Will be enriched later
-                    });
+                    result.summary.total_affinity_change = parseInt(summaryMap.total_affinity_change) || 0;
+                    result.summary.title = summaryMap.title || "";
+                    result.summary.conversation_summary = summaryMap.conversation_summary || summaryMap.chat_overview || "";
+                    result.summary.self_evaluation = summaryMap.self_evaluation || "";
+                    result.summary.chat_overview = summaryMap.chat_overview || result.summary.conversation_summary;
+                    result.summary.performance_evaluation = {
+                        expression_ability: { score: parseInt(summaryMap.expression_score) || null, description: summaryMap.expression_desc || "" },
+                        topic_selection: { score: parseInt(summaryMap.topic_score) || null, description: summaryMap.topic_desc || "" }
+                    };
+                    result.summary.tags = (summaryMap.tags || "").split(/[;；]/).map(t => t.trim()).filter(Boolean);
+                    result.summary.attitude_analysis = summaryMap.attitude_analysis || "";
                 }
             }
         }
 
-        // Fill in summary counts
-        result.summary.node_count = result.nodes.length;
-        result.summary.matched_count = result.nodes.filter(n => n.choice_type === 'matched').length;
-        result.summary.custom_count = result.nodes.filter(n => n.choice_type === 'custom').length;
+        // 2. 解析 Nodes
+        // 查找所有以 review_nodes 开头的行
+        lines.forEach((line, idx) => {
+            const info = extractFromLine(line, nodesRegex);
+            if (!info) return;
+
+            // 处理逻辑：
+            // A. 数据在当前行后缀
+            // B. 数据在下一行
+            // C. 数据就在当前行的 {} 里面（LLM 常见错误）
+
+            let dataLines = [];
+            if (info.suffix) {
+                dataLines.push(info.suffix);
+            } else {
+                // Check if fieldsText is already data
+                const text = info.fieldsText;
+                const isHeader = text && (text.toLowerCase().includes('node_id') || text.toLowerCase().includes('decision_point_id') || text.includes('review_node'));
+                const hasCommas = text && (text.includes(',') || text.includes('，'));
+
+                if (hasCommas && !isHeader) {
+                    dataLines.push(text);
+                } else {
+                    // Fallback: look for data in following lines
+                    for (let i = idx + 1; i < lines.length; i++) {
+                        if (lines[i].match(/^review_/)) break;
+                        dataLines.push(lines[i]);
+                    }
+                }
+            }
+
+            dataLines.forEach(dl => {
+                const parts = this.csvSplit(dl);
+                if (parts.length >= 6) { // node_id,title,type,matched_id,conf,desc,reasoning
+                    let nodeId = parts[0];
+                    if (nodeId && !nodeId.startsWith('node_') && !isNaN(nodeId)) {
+                        nodeId = `node_${nodeId}`;
+                    }
+                    const originalNode = originalNodes?.find(n => n.node_id === nodeId);
+                    result.nodes.push({
+                        node_id: nodeId,
+                        node_title: parts[1],
+                        timestamp: originalNode ? originalNode.timestamp : (result.nodes.length > 0 ? result.nodes[result.nodes.length - 1].timestamp + 1000 : 0),
+                        choice_type: parts[2] === 'matched' ? 'matched' : (parts[2] === 'insight' ? 'insight' : 'custom'),
+                        matched_suggestion_id: parts[3] || null,
+                        match_confidence: parseFloat(parts[4]) || 0,
+                        user_description: parts[5],
+                        reasoning: parts[6] || "",
+                        ghost_options: []
+                    });
+                }
+            });
+        });
+
+        // 去重（防止 LLM 每行都重复 header 导致重复解析）
+        const seenNodes = new Set();
+        result.nodes = result.nodes.filter(n => {
+            if (seenNodes.has(n.node_id)) return false;
+            seenNodes.add(n.node_id);
+            return true;
+        });
 
         return result;
     }
@@ -662,6 +738,12 @@ review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluati
 
         safe.has_nodes = safe.nodes.length > 0;
         safe.summary.node_count = safe.nodes.length;
+
+        // 关键决策：原始输入中存在的节点（带系统建议）
+        safe.summary.decision_count = safe.nodes.filter(n => n.has_source).length;
+        // 转折点/Insight：LLM 额外识别的节点
+        safe.summary.insight_count = safe.nodes.filter(n => !n.has_source).length;
+
         safe.summary.matched_count = safe.nodes.filter(n => n.choice_type === 'matched').length;
         safe.summary.custom_count = safe.nodes.filter(n => n.choice_type === 'custom').length;
         if (safe.summary.total_affinity_change === undefined || safe.summary.total_affinity_change === null) {
@@ -710,6 +792,9 @@ review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluati
     enrichGhostOptions(reviewData, originalNodes) {
         reviewData.nodes.forEach(reviewNode => {
             const original = originalNodes.find(n => n.node_id === reviewNode.node_id);
+            // Mark if this node originated from a system suggestion (vs pure LLM insight)
+            reviewNode.has_source = !!original;
+
             if (original) {
                 reviewNode.ghost_options = original.suggestions
                     .filter(s => s.id !== reviewNode.matched_suggestion_id) // Filter out matched one
@@ -717,6 +802,43 @@ review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluati
                         suggestion_id: s.id,
                         content: s.content || s.title
                     }));
+            }
+        });
+    }
+
+    enrichAudioInfo(reviewData, conversationId) {
+        if (!reviewData.nodes || reviewData.nodes.length === 0) return;
+
+        // 获取该对话的所有录音记录，按时间排序
+        const records = this.db.getSpeechRecordsByConversation(conversationId);
+        if (!records || records.length === 0) return;
+
+        reviewData.nodes.forEach(node => {
+            if (!node.timestamp) return;
+
+            // 寻找离该节点 timestamp 最近的一个录音记录 (时间差最小)
+            // 且录音记录通常在节点之前或附近（例如用户说话后产生的节点）
+            let closest = null;
+            let minDiff = Infinity;
+
+            for (const record of records) {
+                // 录音记录的 start_time 或 end_time 与节点 timestamp 的关系
+                // 建议使用 end_time，因为识别完成时刻更接近节点触发时刻
+                const refTime = record.end_time || record.start_time;
+                const diff = Math.abs(refTime - node.timestamp);
+
+                // 只有当录音记录有文件路径时才考虑
+                if (record.audio_file_path && diff < minDiff) {
+                    minDiff = diff;
+                    closest = record;
+                }
+            }
+
+            // 如果找到且时间差距在合理范围内（例如 30秒内），则关联
+            if (closest && minDiff < 30000) {
+                node.audio_record_id = closest.id;
+                node.audio_file_path = closest.audio_file_path;
+                node.audio_duration = closest.audio_duration;
             }
         });
     }

@@ -709,3 +709,64 @@ INSERT OR IGNORE INTO ai_suggestions (id, conversation_id, message_id, decision_
 ('sugg_review3_b', 'conv_review_stress_1', 'msg_review120_110', NULL, NULL, NULL, '贴心提醒', '提前发送歌单帮助放松', 1, '贴心,音乐', 1737600011050),
 ('sugg_review3_c', 'conv_review_stress_1', 'msg_review120_110', NULL, NULL, NULL, '节奏控制', '建议早点休息保持状态', 1, '关心,休息', 1737600011050);
 
+-- === 复盘功能测试对话 ===
+-- 用于测试决策树展示效果的完整对话，包含多个决策点
+
+-- 测试对话：与 Miyu 的深度交流
+INSERT OR IGNORE INTO conversations (id, character_id, title, date, affinity_change, summary, tags, created_at, updated_at) VALUES
+('conv_review_test_1', 'miyu', '复盘测试：深夜游戏与情感交流', 1738000000000, 18, '一次包含多个关键决策点的对话，用于测试复盘功能和决策树可视化', '测试,复盘,游戏,情感,决策', 1738000000000, 1738000000000);
+
+-- 插入消息（15条消息，形成多个决策点）
+INSERT OR IGNORE INTO messages (id, conversation_id, sender, content, timestamp, is_ai_generated) VALUES
+-- 第一段对话：游戏邀请
+('msg_review_test_001', 'conv_review_test_1', 'character', '今晚有空吗？要不要一起打游戏？', 1738000000000, 0),
+('msg_review_test_002', 'conv_review_test_1', 'user', '好啊！我刚好也想放松一下', 1738000001000, 0),
+('msg_review_test_003', 'conv_review_test_1', 'character', '太好了！我最近在练新英雄，想找人配合', 1738000002000, 0),
+-- 第二段对话：选择游戏
+('msg_review_test_004', 'conv_review_test_1', 'character', '你想玩什么？LOL还是原神？', 1738000003000, 0),
+('msg_review_test_005', 'conv_review_test_1', 'user', 'LOL吧，好久没玩了', 1738000004000, 0),
+('msg_review_test_006', 'conv_review_test_1', 'character', '好！那我选辅助，你打ADC', 1738000005000, 0),
+-- 第三段对话：游戏中的交流
+('msg_review_test_007', 'conv_review_test_1', 'character', '这波配合不错！', 1738000006000, 0),
+('msg_review_test_008', 'conv_review_test_1', 'user', '哈哈，你控得真好', 1738000007000, 0),
+('msg_review_test_009', 'conv_review_test_1', 'character', '我们赢了！', 1738000008000, 0),
+-- 第四段对话：游戏后的情感交流
+('msg_review_test_010', 'conv_review_test_1', 'character', '今天玩得真开心，谢谢你陪我', 1738000009000, 0),
+('msg_review_test_011', 'conv_review_test_1', 'user', '我也很开心，和你一起玩总是很放松', 1738000010000, 0),
+('msg_review_test_012', 'conv_review_test_1', 'character', '真的吗？那以后经常一起玩吧', 1738000011000, 0),
+-- 第五段对话：深入话题
+('msg_review_test_013', 'conv_review_test_1', 'character', '其实...我最近心情不太好', 1738000012000, 0),
+('msg_review_test_014', 'conv_review_test_1', 'user', '怎么了？愿意和我说说吗', 1738000013000, 0),
+('msg_review_test_015', 'conv_review_test_1', 'character', '谢谢你愿意听我说...', 1738000014000, 0);
+
+-- 插入多个批次的 AI 建议（形成决策点）
+-- 决策点1：回应游戏邀请（msg_review_test_002 之后）
+INSERT OR IGNORE INTO ai_suggestions (id, conversation_id, message_id, decision_point_id, batch_id, suggestion_index, title, content, affinity_prediction, tags, created_at) VALUES
+('sugg_test_1_a', 'conv_review_test_1', 'msg_review_test_002', NULL, 'batch_test_1', 0, '积极回应', '好啊！我刚好也想放松一下', 5, '积极,游戏', 1738000001500),
+('sugg_test_1_b', 'conv_review_test_1', 'msg_review_test_002', NULL, 'batch_test_1', 1, '询问细节', '好啊，你想玩什么游戏？', 3, '询问,关心', 1738000001500),
+('sugg_test_1_c', 'conv_review_test_1', 'msg_review_test_002', NULL, 'batch_test_1', 2, '表达期待', '太好了！我正想找人一起玩', 4, '期待,热情', 1738000001500);
+
+-- 决策点2：选择游戏类型（msg_review_test_004 之后）
+INSERT OR IGNORE INTO ai_suggestions (id, conversation_id, message_id, decision_point_id, batch_id, suggestion_index, title, content, affinity_prediction, tags, created_at) VALUES
+('sugg_test_2_a', 'conv_review_test_1', 'msg_review_test_004', NULL, 'batch_test_2', 0, '选择LOL', 'LOL吧，好久没玩了', 6, '选择,游戏', 1738000003500),
+('sugg_test_2_b', 'conv_review_test_1', 'msg_review_test_004', NULL, 'batch_test_2', 1, '选择原神', '原神吧，我想刷副本', 5, '选择,游戏', 1738000003500),
+('sugg_test_2_c', 'conv_review_test_1', 'msg_review_test_004', NULL, 'batch_test_2', 2, '让对方决定', '你决定吧，我都可以', 4, '体贴,随和', 1738000003500);
+
+-- 决策点3：游戏中的互动（msg_review_test_007 之后）
+INSERT OR IGNORE INTO ai_suggestions (id, conversation_id, message_id, decision_point_id, batch_id, suggestion_index, title, content, affinity_prediction, tags, created_at) VALUES
+('sugg_test_3_a', 'conv_review_test_1', 'msg_review_test_007', NULL, 'batch_test_3', 0, '赞美配合', '哈哈，你控得真好', 7, '赞美,互动', 1738000006500),
+('sugg_test_3_b', 'conv_review_test_1', 'msg_review_test_007', NULL, 'batch_test_3', 1, '谦虚回应', '没有啦，是你打得好', 5, '谦虚,互动', 1738000006500),
+('sugg_test_3_c', 'conv_review_test_1', 'msg_review_test_007', NULL, 'batch_test_3', 2, '继续配合', '我们继续配合，争取赢下这局', 6, '积极,配合', 1738000006500);
+
+-- 决策点4：游戏后的情感回应（msg_review_test_010 之后）
+INSERT OR IGNORE INTO ai_suggestions (id, conversation_id, message_id, decision_point_id, batch_id, suggestion_index, title, content, affinity_prediction, tags, created_at) VALUES
+('sugg_test_4_a', 'conv_review_test_1', 'msg_review_test_010', NULL, 'batch_test_4', 0, '表达共鸣', '我也很开心，和你一起玩总是很放松', 8, '情感,共鸣', 1738000009500),
+('sugg_test_4_b', 'conv_review_test_1', 'msg_review_test_010', NULL, 'batch_test_4', 1, '简单回应', '不客气，我也玩得很开心', 5, '简单,礼貌', 1738000009500),
+('sugg_test_4_c', 'conv_review_test_1', 'msg_review_test_010', NULL, 'batch_test_4', 2, '提出下次', '那我们下次再一起玩吧', 6, '主动,邀约', 1738000009500);
+
+-- 决策点5：深入情感话题（msg_review_test_013 之后）
+INSERT OR IGNORE INTO ai_suggestions (id, conversation_id, message_id, decision_point_id, batch_id, suggestion_index, title, content, affinity_prediction, tags, created_at) VALUES
+('sugg_test_5_a', 'conv_review_test_1', 'msg_review_test_013', NULL, 'batch_test_5', 0, '主动关心', '怎么了？愿意和我说说吗', 9, '关心,倾听', 1738000012500),
+('sugg_test_5_b', 'conv_review_test_1', 'msg_review_test_013', NULL, 'batch_test_5', 1, '转移话题', '别想太多，我们继续玩游戏吧', 3, '回避,转移', 1738000012500),
+('sugg_test_5_c', 'conv_review_test_1', 'msg_review_test_013', NULL, 'batch_test_5', 2, '表达支持', '我会陪着你的，有什么都可以和我说', 8, '支持,陪伴', 1738000012500);
+
