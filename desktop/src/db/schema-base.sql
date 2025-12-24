@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS ai_suggestions (
   content TEXT NOT NULL,
   affinity_prediction INTEGER, -- 好感度变化预测
   tags TEXT, -- 标签（逗号分隔）
+  is_selected INTEGER DEFAULT 0, -- 用户显式选择（用于“我采用了哪个建议”）
+  selected_at INTEGER, -- 选择时间戳（毫秒）
   created_at INTEGER NOT NULL,
   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
   FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE

@@ -1,3 +1,5 @@
+import { renderPromptTemplate } from './prompt-manager.js';
+
 const DEFAULT_REVIEW_TIMEOUT_MS = 1000 * 20;
 
 export default class ReviewService {
@@ -86,6 +88,8 @@ export default class ReviewService {
         // 2. 按时间戳分组，识别节点
         report('group_nodes', 0.15, '识别决策点并分组...');
         const nodesRaw = this.groupIntoNodes(suggestions);
+        const explicitReviewNodes = this.buildReviewNodesFromUserSelection(nodesRaw);
+        const affinityFromSelection = this.computeAffinityChangeFromSelection(explicitReviewNodes);
         const conversation = this.db.getConversationById(conversationId);
 
         // 3. 特殊情况处理：
@@ -131,11 +135,22 @@ export default class ReviewService {
 
         // 5. 补充 ghost_options
         report('enrich', 0.82, '补齐未选择路径（ghost options）...');
+        // 在“用户显式选择”模式下，节点与选择由系统决定，不依赖 LLM 输出
+        reviewData.nodes = explicitReviewNodes;
+        reviewData.has_nodes = explicitReviewNodes.length > 0;
+        if (!reviewData.summary) reviewData.summary = {};
+        reviewData.summary.node_count = explicitReviewNodes.length;
+        reviewData.summary.matched_count = explicitReviewNodes.filter((n) => n.choice_type === 'selected').length;
+        reviewData.summary.custom_count = explicitReviewNodes.filter((n) => n.choice_type !== 'selected').length;
         this.enrichGhostOptions(reviewData, nodes);
 
         // 6. 校验/兜底
         report('validate', 0.86, '校验并兜底复盘结构...');
         reviewData = this.ensureReviewDataIntegrity(reviewData, nodes, conversation);
+
+        // 6.1 覆盖好感度变化：完全由用户显式选择决定
+        if (!reviewData.summary) reviewData.summary = {};
+        reviewData.summary.total_affinity_change = affinityFromSelection;
 
         // 7. 保存
         report('save', 0.9, '保存复盘结果...');
@@ -243,7 +258,9 @@ export default class ReviewService {
 
         const nodes = [];
 
-        // 1) 新版：按 decision_point_id 聚合；同一决策点内取“最新 batch”作为该节点的选项
+        // 1) 新版：按 decision_point_id 聚合；
+        // - 若用户在某个 batch 显式选择了建议，则该决策点选择“被选中项所在 batch”作为节点选项（便于回放 ghost options）
+        // - 否则取“最新 batch”作为该节点的选项
         if (withDecisionPoint.length > 0) {
             const byDP = new Map();
             for (const s of withDecisionPoint) {
@@ -269,6 +286,15 @@ export default class ReviewService {
                 }
                 const batchCount = byBatch.size;
 
+                // 若存在显式选择，优先使用该 batch
+                let selectedBatchId = null;
+                for (const [batchId, list] of byBatch.entries()) {
+                    if (list.some((x) => x && (x.is_selected === 1 || x.is_selected === true || x.is_selected === '1'))) {
+                        selectedBatchId = batchId;
+                        break;
+                    }
+                }
+
                 let latestBatchId = null;
                 let latestBatchTs = -1;
                 for (const [batchId, list] of byBatch.entries()) {
@@ -279,7 +305,8 @@ export default class ReviewService {
                     }
                 }
 
-                const latest = (latestBatchId && byBatch.get(latestBatchId)) ? byBatch.get(latestBatchId) : group.list;
+                const pickedBatchId = selectedBatchId || latestBatchId;
+                const latest = (pickedBatchId && byBatch.get(pickedBatchId)) ? byBatch.get(pickedBatchId) : group.list;
                 const sortedLatest = [...latest].sort((a, b) => {
                     const aIndex = a.suggestion_index ?? a.index ?? 999;
                     const bIndex = b.suggestion_index ?? b.index ?? 999;
@@ -288,7 +315,7 @@ export default class ReviewService {
 
                 nodes.push({
                     decision_point_id: group.dpId,
-                    batch_id: latestBatchId !== 'unknown' ? latestBatchId : null,
+                    batch_id: pickedBatchId !== 'unknown' ? pickedBatchId : null,
                     batch_count: batchCount,
                     timestamp: sortedLatest[0]?.created_at || group.minTs,
                     suggestions: sortedLatest
@@ -396,58 +423,41 @@ export default class ReviewService {
             }).join('\n\n')
             : "无关键决策节点";
 
-        return `
-# Role
-你是恋爱对话复盘分析师。
+        const promptId = nodes.length > 0 ? 'review.with_nodes' : 'review.no_nodes';
+        return renderPromptTemplate(promptId, {
+            transcript,
+            nodeInfo,
+            nodesCount: nodes.length
+        });
+    }
 
-# Task
-${nodes.length > 0 ? '根据对话记录和已知的"关键节点"（系统当时生成选项的时刻），判断用户实际选择了什么，并总结对话。' : '根据对话记录，总结对话内容并评估好感度变化。'}
-补充以下内容：
-1. 用户表现评价：对用户在本次对话中的表现做详细评价，包括：
-   - 表述能力评分（0-100分）和一句话评价（10~30字）
-   - 话题选择评分（0-100分）和一句话评价（10~30字）
-2. 标题与概要：
-   - 为本次对话生成一个标题（title），6-15字，吸引人且概括核心内容。
-   - 用1-2句话概述对话主题/走向（conversation_summary），适合直接展示给用户。
-   - 整体表现评价（10~40字）
-3. 对话标签（Tag）：生成3-5个简短的标签（如：破冰、分享、幽默、关心），概括对话特点。
-4. 对象态度分析：详细分析对象对用户的好感度变化和态度倾向（20~50字）。
+    buildReviewNodesFromUserSelection(nodes = []) {
+        const reviewNodes = [];
+        for (const node of nodes || []) {
+            const suggestions = Array.isArray(node.suggestions) ? node.suggestions : [];
+            const selected = suggestions.find((s) => s && (s.is_selected === 1 || s.is_selected === true || s.is_selected === '1')) || null;
+            reviewNodes.push({
+                node_id: node.node_id,
+                node_title: selected?.title || '已选择建议',
+                timestamp: node.timestamp || 0,
+                choice_type: selected ? 'selected' : 'unselected',
+                selected_suggestion_id: selected?.id || null,
+                selected_affinity_delta: typeof selected?.affinity_prediction === 'number' ? selected.affinity_prediction : null,
+                user_description: selected?.content || selected?.title || (selected ? '已选择建议' : '未选择建议'),
+                reasoning: selected
+                    ? `该节点为用户显式选择：${selected.title || selected.id || '建议'}.`
+                    : '该节点未进行显式选择，无法从系统记录确定采用了哪个选项。',
+                ghost_options: []
+            });
+        }
+        return reviewNodes;
+    }
 
-# Input
-
-## 对话记录
-${transcript}
-
-## 关键节点及当时的选项
-${nodeInfo}
-
-# Output (TOON 格式)
-输出分为两部分，请严格遵守格式，不要输出其他废话：
-
-${nodes.length > 0 ? `第一部分：节点分析（每行一个节点）
-review_nodes[${nodes.length}]{node_id,title,choice_type,matched_id,confidence,user_desc,reasoning}:
-<节点ID>,<标题>,<matched/custom>,<匹配ID>,<置信度0-1>,<用户行为描述>,<原因分析>
-
-第二部分：整体总结（单独一行）` : `第一部分：整体总结（单独一行）`}
-review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluation,chat_overview,expression_score,expression_desc,topic_score,topic_desc,tags,attitude_analysis}:
-<好感度变化整数>,<对话标题>,<对话整体概述>,<用户整体表现评价>,<对话概要>,<表述能力评分0-100>,<表述能力描述>,<话题选择评分0-100>,<话题选择描述>,<标签列表（分号分隔）>,<对象态度分析>
-
-# 规则
-${nodes.length > 0 ? `- choice_type: 如果用户的回复语义接近某选项 → matched，否则 → custom
-- confidence: 0.8+ 高度匹配，0.5-0.8 部分匹配，<0.5 归为 custom
-- matched_id: 仅 choice_type=matched 时填写选项ID
-- 节点数据行数必须与提供的节点数一致` : ''}
-- total_affinity_change: 整个会话的好感度变化，-10 到 +10 的整数
-- 字段用英文逗号分隔，如内容含逗号请用引号包裹
-
-# 示例
-${nodes.length > 0 ? `review_nodes[2]{node_id,title,choice_type,matched_id,confidence,user_desc,reasoning}:
-node_1,初次问候,matched,sugg_101,0.92,主动打招呼表达惊喜,积极社交建立好感
-node_2,深入交流,custom,,0.3,"聊了冰岛旅行和极光",独特故事引发兴趣
-review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluation,chat_overview,expression_score,expression_desc,topic_score,topic_desc,tags,attitude_analysis}:
-+16,浪漫极光之旅,整体对话轻松愉快，双方互有好感，关系稳步推进,整体回应礼貌主动，能跟随对方话题,围绕旅行经历展开分享，氛围轻松友好,85,表达自然流畅，用词恰当,88,话题选择合适，能引发共鸣,轻松;分享;共鸣;旅行,对方表现出浓厚的兴趣，主动分享个人经历，好感度有显著提升。` : `review_summary[1]{total_affinity_change,title,conversation_summary,self_evaluation,chat_overview,expression_score,expression_desc,topic_score,topic_desc,tags,attitude_analysis}:
-+5,初次见面寒暄,双方进行了简单的日常寒暄，氛围和谐。,回复自然有礼，能给予积极反馈,聊了日常和兴趣，气氛温和友善。,82,表达自然有礼,85,话题选择合适,日常;寒暄;温和,对方态度友善，回应积极，但尚未深入交流，保持礼貌距离。`}
-`;
+    computeAffinityChangeFromSelection(reviewNodes = []) {
+        const deltas = Array.isArray(reviewNodes) ? reviewNodes.map((n) => n?.selected_affinity_delta).filter((v) => typeof v === 'number' && !Number.isNaN(v)) : [];
+        const sum = deltas.reduce((acc, v) => acc + v, 0);
+        // 复盘口径：整段对话总变化限制到 [-10, +10]（与 UI/历史数据兼容）
+        return Math.max(-10, Math.min(10, Math.round(sum)));
     }
 
     async callLLMForReview(messages, nodes) {

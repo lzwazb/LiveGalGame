@@ -82,7 +82,7 @@ function StatCard({ label, value, highlight }) {
 }
 
 function StoryNodeItem({ node }) {
-    const isMatched = node.choice_type === 'matched';
+    const isMatched = node.choice_type === 'selected' || node.choice_type === 'matched';
     const dateStr = new Date(node.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
     return (
@@ -111,13 +111,12 @@ function StoryNodeItem({ node }) {
                         <div className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold mb-2
                             ${isMatched ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'}
                         `}>
-                            {isMatched ? '[已命中]' : '[自定义]'}
-                            {isMatched && node.match_confidence && ` 置信度 ${(node.match_confidence * 100).toFixed(0)}%`}
+                            {isMatched ? '[已选择]' : '[未选择]'}
                         </div>
                         <p className="text-base font-medium">
                             {isMatched
                                 ? `你选择了: "${getSuggestionContent(node)}"`
-                                : `你回复了: "${node.user_description}"`
+                                : `该节点未选择建议`
                             }
                         </p>
                     </div>
@@ -148,12 +147,5 @@ function StoryNodeItem({ node }) {
 }
 
 function getSuggestionContent(node) {
-    // If we have the matched suggestion content available (passed from backend possibly?)
-    // currently node has matched_suggestion_id. Ideally backend enriches this for us or we search ghost options?
-    // Wait, backend enrichment logic in review-service.js only enriches ghost_options.
-    // Ideally we should have the content of the matched choice locally or in node.matched_content.
-    // Checking review-service.js: it does not populate matched content directly in node root, only ID.
-    // But it has `user_description` which for matched might be the summary?
-    // Or... we should use user_description for now which describes what user did.
     return node.user_description;
 }
