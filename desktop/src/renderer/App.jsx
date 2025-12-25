@@ -5,6 +5,7 @@ import Characters from './pages/Characters';
 import ConversationEditor from './pages/ConversationEditor';
 import Settings from './pages/Settings';
 import ASRSettings from './pages/ASRSettings';
+import StoryTreePage from './pages/StoryTreePage';
 
 function App() {
   console.log('App component rendering');
@@ -14,6 +15,7 @@ function App() {
         <Route path="/" element={<Overview />} />
         <Route path="/characters" element={<Characters />} />
         <Route path="/conversations" element={<ConversationEditor />} />
+        <Route path="/review/:conversationId" element={<StoryTreePage />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/asr-settings" element={<ASRSettings />} />
         <Route path="*" element={<Navigate to="/" replace />} />

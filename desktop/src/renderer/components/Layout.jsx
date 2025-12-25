@@ -1,9 +1,14 @@
 import { Link, useLocation } from 'react-router-dom';
-import { useId } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
+import { calculateProgress, formatBytes, formatSpeed } from '../pages/asrSettingsUtils';
 
 function Layout({ children }) {
   const location = useLocation();
   const logoId = useId();
+  const [downloadStatus, setDownloadStatus] = useState(null);
+  const hideTimerRef = useRef(null);
+  const [hudNotice, setHudNotice] = useState(null);
+  const hudNoticeTimerRef = useRef(null);
 
   const isActive = (path) => {
     if (path === '/') {
@@ -11,6 +16,172 @@ function Layout({ children }) {
     }
     return location.pathname.startsWith(path);
   };
+
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api) {
+      return undefined;
+    }
+
+    const cleanups = [];
+
+    const upsertStatus = (payload = {}) => {
+      setDownloadStatus((prev) => {
+        const base = prev || {};
+        return {
+          ...base,
+          ...payload,
+          lastUpdated: Date.now()
+        };
+      });
+    };
+
+    const handleStart = (payload) => {
+      if (hideTimerRef.current) {
+        clearTimeout(hideTimerRef.current);
+      }
+      upsertStatus({
+        ...payload,
+        activeDownload: true,
+        status: 'start',
+        source: payload?.source || 'preload'
+      });
+    };
+
+    const handleProgress = (payload) => {
+      upsertStatus({
+        ...payload,
+        activeDownload: true,
+        status: 'progress',
+        source: payload?.source || 'preload'
+      });
+    };
+
+    const handleComplete = (payload) => {
+      const status = payload?.status || {};
+      upsertStatus({
+        ...status,
+        ...payload,
+        activeDownload: false,
+        status: 'complete',
+        isDownloaded: true,
+        source: payload?.source || status?.source || 'preload'
+      });
+      hideTimerRef.current = setTimeout(() => {
+        setDownloadStatus(null);
+      }, 5000);
+    };
+
+    const handleError = (payload) => {
+      if (hideTimerRef.current) {
+        clearTimeout(hideTimerRef.current);
+      }
+      upsertStatus({
+        ...payload,
+        activeDownload: false,
+        status: 'error',
+        source: payload?.source || 'preload'
+      });
+    };
+
+    const handleCancelled = (payload) => {
+      if (hideTimerRef.current) {
+        clearTimeout(hideTimerRef.current);
+      }
+      upsertStatus({
+        ...payload,
+        activeDownload: false,
+        status: 'cancelled',
+        source: payload?.source || 'preload'
+      });
+      hideTimerRef.current = setTimeout(() => setDownloadStatus(null), 2000);
+    };
+
+    if (api.onAsrModelDownloadStarted) {
+      cleanups.push(api.onAsrModelDownloadStarted(handleStart));
+    }
+    if (api.onAsrModelDownloadProgress) {
+      cleanups.push(api.onAsrModelDownloadProgress(handleProgress));
+    }
+    if (api.onAsrModelDownloadComplete) {
+      cleanups.push(api.onAsrModelDownloadComplete(handleComplete));
+    }
+    if (api.onAsrModelDownloadError) {
+      cleanups.push(api.onAsrModelDownloadError(handleError));
+    }
+    if (api.onAsrModelDownloadCancelled) {
+      cleanups.push(api.onAsrModelDownloadCancelled(handleCancelled));
+    }
+
+    return () => {
+      cleanups.forEach((cleanup) => {
+        if (typeof cleanup === 'function') {
+          cleanup();
+        }
+      });
+      if (hideTimerRef.current) {
+        clearTimeout(hideTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.on) {
+      return undefined;
+    }
+
+    const safeNumber = (value) => (typeof value === 'number' && !Number.isNaN(value) ? value : null);
+
+    const handleHudLoading = (payload = {}) => {
+      if (hudNoticeTimerRef.current) {
+        clearTimeout(hudNoticeTimerRef.current);
+      }
+      const waitedSeconds = safeNumber(payload.waitedSeconds);
+      const message = payload.message
+        || (payload.downloading
+          ? '正在下载语音模型，首次下载可能较慢，请耐心等待...'
+          : 'ASR 模型正在加载，HUD 将在就绪后自动打开');
+      setHudNotice({
+        message,
+        waitedSeconds,
+        ready: false,
+        downloading: Boolean(payload.downloading)
+      });
+      if (api.log) {
+        try {
+          const waitedLabel = waitedSeconds !== null ? `（已等待 ${waitedSeconds.toFixed(1)}s）` : '';
+          api.log(`[HUD] ${message}${waitedLabel}`);
+        } catch (error) {
+          console.warn('[HUD] 记录日志失败:', error);
+        }
+      }
+    };
+
+    const handleHudReady = (payload = {}) => {
+      const waitedSeconds = safeNumber(payload.waitedSeconds);
+      setHudNotice((prev) => ({
+        message: payload.message || 'ASR 模型已就绪，正在打开 HUD',
+        waitedSeconds: waitedSeconds ?? prev?.waitedSeconds ?? null,
+        ready: true
+      }));
+      if (hudNoticeTimerRef.current) {
+        clearTimeout(hudNoticeTimerRef.current);
+      }
+      hudNoticeTimerRef.current = setTimeout(() => setHudNotice(null), 3000);
+    };
+
+    api.on('hud-loading', handleHudLoading);
+    api.on('hud-ready', handleHudReady);
+
+    return () => {
+      api.removeListener?.('hud-loading', handleHudLoading);
+      api.removeListener?.('hud-ready', handleHudReady);
+      if (hudNoticeTimerRef.current) {
+        clearTimeout(hudNoticeTimerRef.current);
+      }
+    };
+  }, []);
 
   const handleMinimize = () => {
     window.electronAPI?.minimizeWindow();
@@ -314,6 +485,83 @@ function Layout({ children }) {
 
         {/* 主内容区域 */}
         <main className="flex-1 overflow-y-auto" style={{ paddingTop: '40px' }}>
+          {hudNotice && (
+            <div className="px-6 pt-4">
+              <div className={`rounded-xl border ${hudNotice.ready ? 'border-green-200 bg-green-50' : 'border-amber-200 bg-amber-50'} shadow-sm`}>
+                <div className="flex items-start justify-between gap-3 px-4 py-3">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">
+                      {hudNotice.ready ? 'ASR 模型已就绪，正在打开 HUD' : 'ASR 模型加载中，HUD 将在就绪后弹出'}
+                    </div>
+                    <div className="text-xs text-gray-700 mt-1">
+                      {hudNotice.message}
+                      {typeof hudNotice.waitedSeconds === 'number'
+                        ? `（已等待 ${hudNotice.waitedSeconds.toFixed(1)}s）`
+                        : ''}
+                    </div>
+                  </div>
+                  <button
+                    className="text-gray-500 hover:text-gray-700 text-sm"
+                    onClick={() => setHudNotice(null)}
+                    title="关闭提示"
+                    style={{ WebkitAppRegion: 'no-drag' }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {downloadStatus && (
+            <div className="px-6 pt-4">
+              <div className="rounded-xl border border-blue-200 bg-white shadow-sm">
+                <div className="flex items-start justify-between gap-3 px-4 py-3">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">
+                      ASR 模型下载中（首次运行可能较久）
+                    </div>
+                    <div className="text-xs text-gray-600 mt-1">
+                      {downloadStatus.status === 'complete'
+                        ? '下载完成，语音识别已就绪'
+                        : downloadStatus.status === 'error'
+                          ? `下载失败：${downloadStatus.message || '请检查网络后重试'}`
+                          : '后台正在准备语音模型，请保持应用运行'}
+                    </div>
+                  </div>
+                  <button
+                    className="text-gray-500 hover:text-gray-700 text-sm"
+                    onClick={() => setDownloadStatus(null)}
+                    title="关闭提示"
+                    style={{ WebkitAppRegion: 'no-drag' }}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="px-4 pb-4">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                    <div
+                      className="h-full rounded-full bg-blue-500"
+                      style={{
+                        width: `${calculateProgress(
+                          downloadStatus.downloadedBytes || 0,
+                          downloadStatus.totalBytes || downloadStatus.sizeBytes || 0
+                        )}%`
+                      }}
+                    />
+                  </div>
+                  <div className="mt-2 flex items-center justify-between text-xs text-gray-600">
+                    <span>
+                      {formatBytes(downloadStatus.downloadedBytes || 0)} / {formatBytes(downloadStatus.totalBytes || downloadStatus.sizeBytes || 0)} ({calculateProgress(
+                        downloadStatus.downloadedBytes || 0,
+                        downloadStatus.totalBytes || downloadStatus.sizeBytes || 0
+                      )}%)
+                    </span>
+                    <span>速度：{formatSpeed(downloadStatus.bytesPerSecond)}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           {children}
         </main>
       </div>

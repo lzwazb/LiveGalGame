@@ -11,6 +11,85 @@ const logger = {
   debug: console.debug.bind(console)
 };
 
+// 由于我们在 `on/once` 中会包一层 listener 来去掉 event 参数，
+// 这里维护一个映射，确保 `removeListener` 可以正确移除（避免监听器泄漏/重复触发）
+const listenerRegistry = new Map(); // channel -> Map(originalCallback -> wrappedCallback)
+
+function getChannelRegistry(channel) {
+  if (!listenerRegistry.has(channel)) {
+    listenerRegistry.set(channel, new Map());
+  }
+  return listenerRegistry.get(channel);
+}
+
+function registerWrappedListener(channel, callback, { once = false } = {}) {
+  if (typeof channel !== 'string' || typeof callback !== 'function') {
+    return () => { };
+  }
+
+  const channelMap = getChannelRegistry(channel);
+  const existing = channelMap.get(callback);
+  if (existing) {
+    try {
+      ipcRenderer.removeListener(channel, existing);
+    } catch {
+      // ignore
+    }
+  }
+
+  const wrapped = (event, ...args) => {
+    try {
+      callback(...args);
+    } finally {
+      // once 的 listener 触发后会自动移除，但我们也要清理映射
+      if (once) {
+        channelMap.delete(callback);
+      }
+    }
+  };
+
+  channelMap.set(callback, wrapped);
+  if (once) {
+    ipcRenderer.once(channel, wrapped);
+  } else {
+    ipcRenderer.on(channel, wrapped);
+  }
+
+  return () => {
+    try {
+      const stored = channelMap.get(callback);
+      if (!stored) return;
+      ipcRenderer.removeListener(channel, stored);
+      channelMap.delete(callback);
+    } catch {
+      // ignore
+    }
+  };
+}
+
+function removeWrappedListener(channel, callback) {
+  if (typeof channel !== 'string' || typeof callback !== 'function') {
+    return;
+  }
+  const channelMap = listenerRegistry.get(channel);
+  const stored = channelMap?.get(callback);
+  if (stored) {
+    try {
+      ipcRenderer.removeListener(channel, stored);
+    } catch {
+      // ignore
+    }
+    channelMap.delete(callback);
+    return;
+  }
+  // 兼容：如果外部传入的就是原生 listener
+  try {
+    ipcRenderer.removeListener(channel, callback);
+  } catch {
+    // ignore
+  }
+}
+
 // 暴露安全的API给渲染进程
 contextBridge.exposeInMainWorld('electronAPI', {
   // 平台信息
@@ -22,9 +101,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // IPC通信
   send: (channel, data) => ipcRenderer.send(channel, data),
-  on: (channel, callback) => ipcRenderer.on(channel, (event, ...args) => callback(...args)),
-  once: (channel, callback) => ipcRenderer.once(channel, (event, ...args) => callback(...args)),
-  removeListener: (channel, callback) => ipcRenderer.removeListener(channel, callback),
+  on: (channel, callback) => registerWrappedListener(channel, callback, { once: false }),
+  once: (channel, callback) => registerWrappedListener(channel, callback, { once: true }),
+  removeListener: (channel, callback) => removeWrappedListener(channel, callback),
 
   // 日志
   log: (message) => ipcRenderer.send('log', message),
@@ -63,11 +142,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAllConversations: () => ipcRenderer.invoke('db-get-all-conversations'),
   updateMessage: (messageId, updates) => ipcRenderer.invoke('db-update-message', messageId, updates),
   getConversationAIData: (conversationId) => ipcRenderer.invoke('db-get-conversation-ai-data', conversationId),
+  selectActionSuggestion: (payload) => ipcRenderer.invoke('db-select-action-suggestion', payload),
   getCharacterDetails: (characterId) => ipcRenderer.invoke('db-get-character-details', characterId),
   updateCharacterDetailsCustomFields: (characterId, customFields) => ipcRenderer.invoke('db-update-character-details-custom-fields', characterId, customFields),
   regenerateCharacterDetails: (characterId) => ipcRenderer.invoke('db-regenerate-character-details', characterId),
   deleteConversation: (conversationId) => ipcRenderer.invoke('db-delete-conversation', conversationId),
   deleteCharacter: (characterId) => ipcRenderer.invoke('db-delete-character', characterId),
+
+  // Review API
+  getConversationById: (conversationId) => ipcRenderer.invoke('db-get-conversation-by-id', conversationId),
+  getConversationReview: (conversationId) => ipcRenderer.invoke('review:get', conversationId),
+  generateConversationReview: (conversationId, options = {}) =>
+    ipcRenderer.invoke('review:generate', { conversationId, ...options }),
+  onReviewProgress: (callback) => {
+    const listener = (event, data) => callback(data);
+    ipcRenderer.on('review:progress', listener);
+    return () => ipcRenderer.removeListener('review:progress', listener);
+  },
 
   // LLM配置API
   saveLLMConfig: (configData) => ipcRenderer.invoke('llm-save-config', configData),
@@ -77,6 +168,53 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteLLMConfig: (id) => ipcRenderer.invoke('llm-delete-config', id),
   testLLMConnection: (configData) => ipcRenderer.invoke('llm-test-connection', configData),
   setDefaultLLMConfig: (id) => ipcRenderer.invoke('llm-set-default-config', id),
+  getLLMFeatureConfigs: () => ipcRenderer.invoke('llm-get-feature-configs'),
+  setLLMFeatureConfig: (feature, llmConfigId) =>
+    ipcRenderer.invoke('llm-set-feature-config', { feature, llm_config_id: llmConfigId }),
+  generateLLMSuggestions: (payload) => ipcRenderer.invoke('llm-generate-suggestions', payload),
+  detectTopicShift: (payload) => ipcRenderer.invoke('llm-detect-topic-shift', payload),
+  startSuggestionStream: (payload) => {
+    console.log('[Preload] Sending llm-start-suggestion-stream:', payload);
+    ipcRenderer.send('llm-start-suggestion-stream', payload);
+    console.log('[Preload] llm-start-suggestion-stream sent successfully');
+  },
+  // Memory Service (结构化画像/事件)
+  memoryQueryProfiles: (payload) => ipcRenderer.invoke('memory-query-profiles', payload),
+  memoryQueryEvents: (payload) => ipcRenderer.invoke('memory-query-events', payload),
+  onSuggestionStreamStart: (callback) => {
+    const listener = (event, data) => callback(data);
+    ipcRenderer.on('llm-suggestion-stream-start', listener);
+    return () => ipcRenderer.removeListener('llm-suggestion-stream-start', listener);
+  },
+  onSuggestionStreamHeader: (callback) => {
+    const listener = (event, data) => callback(data);
+    ipcRenderer.on('llm-suggestion-stream-header', listener);
+    return () => ipcRenderer.removeListener('llm-suggestion-stream-header', listener);
+  },
+  onSuggestionStreamChunk: (callback) => {
+    const listener = (event, data) => callback(data);
+    ipcRenderer.on('llm-suggestion-stream-chunk', listener);
+    return () => ipcRenderer.removeListener('llm-suggestion-stream-chunk', listener);
+  },
+  onSuggestionStreamPartial: (callback) => {
+    const listener = (event, data) => callback(data);
+    ipcRenderer.on('llm-suggestion-stream-partial', listener);
+    return () => ipcRenderer.removeListener('llm-suggestion-stream-partial', listener);
+  },
+  onSuggestionStreamEnd: (callback) => {
+    const listener = (event, data) => callback(data);
+    ipcRenderer.on('llm-suggestion-stream-end', listener);
+    return () => ipcRenderer.removeListener('llm-suggestion-stream-end', listener);
+  },
+  onSuggestionStreamError: (callback) => {
+    const listener = (event, data) => callback(data);
+    ipcRenderer.on('llm-suggestion-stream-error', listener);
+    return () => ipcRenderer.removeListener('llm-suggestion-stream-error', listener);
+  },
+
+  // 对话建议配置
+  getSuggestionConfig: () => ipcRenderer.invoke('suggestion-get-config'),
+  updateSuggestionConfig: (updates) => ipcRenderer.invoke('suggestion-update-config', updates),
 
   // ASR（语音识别）API
   asrInitialize: (conversationId) => ipcRenderer.invoke('asr-initialize', conversationId),
@@ -86,7 +224,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   asrGetModelPresets: () => ipcRenderer.invoke('asr-get-model-presets'),
   asrGetModelStatus: (modelId) => ipcRenderer.invoke('asr-get-model-status', modelId),
   asrGetAllModelStatuses: () => ipcRenderer.invoke('asr-get-all-model-statuses'),
-  asrDownloadModel: (modelId) => ipcRenderer.invoke('asr-download-model', modelId),
+  // 下载 ASR 模型，允许指定下载源（huggingface / modelscope）
+  asrDownloadModel: (modelId, source) => ipcRenderer.invoke('asr-download-model', modelId, source),
   asrCancelModelDownload: (modelId) => ipcRenderer.invoke('asr-cancel-model-download', modelId),
   asrGetConfigs: () => ipcRenderer.invoke('asr-get-configs'),
   asrCreateConfig: (configData) => ipcRenderer.invoke('asr-create-config', configData),
@@ -98,11 +237,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   asrGetSpeechRecords: (conversationId) => ipcRenderer.invoke('asr-get-speech-records', conversationId),
   asrConvertToMessage: (recordId, conversationId) => ipcRenderer.invoke('asr-convert-to-message', recordId, conversationId),
   asrCleanupAudioFiles: (retentionDays) => ipcRenderer.invoke('asr-cleanup-audio-files', retentionDays),
+  asrGetAudioDataUrl: (filePath) => ipcRenderer.invoke('asr-get-audio-data-url', filePath),
+  asrDeleteAudioFile: (payload) => ipcRenderer.invoke('asr-delete-audio-file', payload),
   asrReloadModel: () => ipcRenderer.invoke('asr-reload-model'),
+  // 模型缓存目录（HF / ModelScope）配置
+  appGetModelCachePaths: () => ipcRenderer.invoke('app-get-model-cache-paths'),
+  appSelectDirectory: (options) => ipcRenderer.invoke('app-select-directory', options),
+  appSetAsrCacheBase: (cacheBase) => ipcRenderer.invoke('app-set-asr-cache-base', cacheBase),
   onAsrModelDownloadStarted: (callback) => {
     const listener = (event, payload) => callback(payload);
     ipcRenderer.on('asr-model-download-started', listener);
     return () => ipcRenderer.removeListener('asr-model-download-started', listener);
+  },
+  onAsrModelDownloadLog: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('asr-model-download-log', listener);
+    return () => ipcRenderer.removeListener('asr-model-download-log', listener);
   },
   onAsrModelDownloadProgress: (callback) => {
     const listener = (event, payload) => callback(payload);
@@ -139,4 +289,8 @@ ipcRenderer.on('window-focused', () => {
   logger.log('Window focused');
 });
 
+console.log('[Preload] Preload script loaded successfully, exposing APIs:', {
+  hasStartSuggestionStream: !!window.electronAPI?.startSuggestionStream,
+  hasSuggestionStreamEvents: !!window.electronAPI?.onSuggestionStreamStart
+});
 logger.log('Preload script loaded successfully');

@@ -23,6 +23,8 @@
 
 <img width="100%" alt="preview" src="https://github.com/user-attachments/assets/d6c44e31-8362-4825-9d7c-a760a4720133" />
 
+<img width="100%" alt="recent preview" src="./docs/20251225-004407.gif" />
+
 ---
 
 ## 核心功能
@@ -63,10 +65,6 @@
 
 ### 下载
 
-[<img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png"
-     alt="Get it on F-Droid"
-     height="75">](https://f-droid.org/packages/com.jstone.livegalgame/)
-     
 - **GitHub Release**: [点击下载](https://github.com/JStone2934/LiveGalGame/tags)
 - **夸克网盘**: https://pan.quark.cn/s/1000136902b5
 - **百度网盘**: https://pan.baidu.com/s/1Bpt2DZNvjzT6BpKr8RyG-A?pwd=94g6
@@ -76,6 +74,13 @@
 ## 桌面端
 
 **Windows / macOS 应用** - 专为语音聊天场景设计的智能助手
+
+### macOS 安装提示（未签名）
+
+- 当前开源版本未做 Apple 官方签名/公证，直接双击 DMG 可能提示“应用已损坏/来自未被认可的开发者”。
+- 推荐做法：在 Finder 中控制键+点按 DMG 内的 `LiveGalGame.app`，选择“打开”，在弹窗中再次“打开”，系统将对本次豁免。（参考 [macguide.leavelet.io](https://macguide.leavelet.io/Bike/appnotopen.html)）
+- 如仍被拦截，可在终端移除隔离属性：`sudo xattr -r -d com.apple.quarantine "/Applications/LiveGalGame.app"`（请替换为实际路径）。
+- 临时放宽 Gatekeeper（风险较高，装完建议恢复）：`sudo spctl --master-disable`，安装后 `sudo spctl --master-enable`。
 
 ### 使用流程
 

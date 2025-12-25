@@ -71,14 +71,38 @@ CREATE TABLE IF NOT EXISTS ai_suggestions (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL,
   message_id TEXT, -- 关联的具体消息（可选）
+  decision_point_id TEXT, -- 关联的决策点（同一决策点可有多批建议）
+  batch_id TEXT, -- 关联的建议批次（一次生成/换一批）
+  suggestion_index INTEGER, -- 批次内序号（0..n-1）
   title TEXT NOT NULL,
   content TEXT NOT NULL,
   affinity_prediction INTEGER, -- 好感度变化预测
   tags TEXT, -- 标签（逗号分隔）
-  is_used INTEGER DEFAULT 0, -- 是否被采用
+  is_selected INTEGER DEFAULT 0, -- 用户显式选择（用于“我采用了哪个建议”）
+  selected_at INTEGER, -- 选择时间戳（毫秒）
   created_at INTEGER NOT NULL,
   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
   FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+);
+
+-- 决策点表：代表“用户需要决定下一步怎么回复”的关键时刻
+CREATE TABLE IF NOT EXISTS decision_points (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  anchor_message_id TEXT, -- 锚点消息（触发时上下文的最后一条消息）
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+  FOREIGN KEY (anchor_message_id) REFERENCES messages(id) ON DELETE SET NULL
+);
+
+-- 建议批次表：一次生成/换一批 = 一个批次
+CREATE TABLE IF NOT EXISTS suggestion_batches (
+  id TEXT PRIMARY KEY,
+  decision_point_id TEXT NOT NULL,
+  trigger TEXT, -- manual/passive 等
+  reason TEXT,  -- manual/refresh/silence/topic_change 等
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (decision_point_id) REFERENCES decision_points(id) ON DELETE CASCADE
 );
 
 -- 角色详细信息表（从会话中总结）
@@ -98,10 +122,37 @@ CREATE TABLE IF NOT EXISTS character_details (
 CREATE TABLE IF NOT EXISTS llm_configs (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL, -- 配置名称
-  provider TEXT NOT NULL DEFAULT 'openai', -- 提供商（openai等）
   api_key TEXT NOT NULL, -- API密钥
   base_url TEXT, -- API基础URL（可选，默认使用提供商的标准URL）
+  model_name TEXT NOT NULL DEFAULT 'gpt-4o-mini', -- 模型名称
+  timeout_ms INTEGER, -- 请求超时（毫秒，可选）
   is_default INTEGER DEFAULT 0, -- 是否为默认配置
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- LLM 功能绑定表（为特定功能选择指定的 LLM 配置；未配置则回落到默认 LLM）
+CREATE TABLE IF NOT EXISTS llm_feature_configs (
+  feature TEXT PRIMARY KEY, -- 功能标识，如 suggestion / situation / review
+  llm_config_id TEXT, -- 绑定的 llm_configs.id
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (llm_config_id) REFERENCES llm_configs(id) ON DELETE SET NULL
+);
+
+-- 对话建议配置表
+CREATE TABLE IF NOT EXISTS suggestion_configs (
+  id TEXT PRIMARY KEY,
+  enable_passive_suggestion INTEGER DEFAULT 1,
+  suggestion_count INTEGER DEFAULT 3,
+  silence_threshold_seconds INTEGER DEFAULT 3,
+  message_threshold_count INTEGER DEFAULT 3,
+  cooldown_seconds INTEGER DEFAULT 30,
+  context_message_limit INTEGER DEFAULT 10,
+  topic_detection_enabled INTEGER DEFAULT 0,
+  situation_llm_enabled INTEGER DEFAULT 0,
+  model_name TEXT DEFAULT 'gpt-4o-mini',
+  situation_model_name TEXT DEFAULT 'gpt-4o-mini',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -114,6 +165,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 CREATE INDEX IF NOT EXISTS idx_character_tags_character_id ON character_tags(character_id);
 CREATE INDEX IF NOT EXISTS idx_ai_analysis_conversation_id ON ai_analysis(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_ai_suggestions_conversation_id ON ai_suggestions(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_ai_suggestions_decision_point_id ON ai_suggestions(decision_point_id);
+CREATE INDEX IF NOT EXISTS idx_ai_suggestions_batch_id ON ai_suggestions(batch_id);
+CREATE INDEX IF NOT EXISTS idx_decision_points_conversation_id ON decision_points(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_suggestion_batches_decision_point_id ON suggestion_batches(decision_point_id);
 CREATE INDEX IF NOT EXISTS idx_character_details_character_id ON character_details(character_id);
 CREATE INDEX IF NOT EXISTS idx_llm_configs_is_default ON llm_configs(is_default);
 
@@ -173,3 +228,13 @@ CREATE INDEX IF NOT EXISTS idx_speech_records_source_id ON speech_recognition_re
 CREATE INDEX IF NOT EXISTS idx_speech_records_status ON speech_recognition_records(status);
 CREATE INDEX IF NOT EXISTS idx_speech_records_created_at ON speech_recognition_records(created_at);
 CREATE INDEX IF NOT EXISTS idx_asr_configs_is_default ON asr_configs(is_default);
+
+-- 剧情复盘表
+CREATE TABLE IF NOT EXISTS conversation_reviews (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  review_data TEXT NOT NULL,  -- TOON 格式解析后存为 JSON
+  created_at INTEGER NOT NULL,
+  model_used TEXT,
+  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);

@@ -17,6 +17,15 @@ function Overview() {
       setLoading(true);
       console.log('Loading data...');
 
+      // 检查是否在 Electron 环境中
+      const isElectron = window.electronAPI !== undefined;
+
+      if (!isElectron) {
+        console.warn('⚠️ 当前不在 Electron 环境中，无法加载数据。请在 Electron 应用中打开此页面。');
+        setLoading(false);
+        return;
+      }
+
       // 加载统计数据
       if (window.electronAPI?.getStatistics) {
         console.log('Calling getStatistics...');
@@ -141,6 +150,22 @@ function Overview() {
                 </div>
               </div>
             </>
+          ) : window.electronAPI === undefined ? (
+            <div className="col-span-full text-center py-8">
+              <div className="inline-flex flex-col items-center gap-4 max-w-md mx-auto">
+                <div className="text-6xl">⚠️</div>
+                <div>
+                  <p className="text-lg font-semibold text-text-light dark:text-text-dark mb-2">
+                    请在 Electron 应用中打开
+                  </p>
+                  <p className="text-sm text-text-muted-light dark:text-text-muted-dark">
+                    当前页面在普通浏览器中打开，无法访问 Electron API。
+                    <br />
+                    请在 LiveGalGame Desktop 应用中查看数据。
+                  </p>
+                </div>
+              </div>
+            </div>
           ) : (
             <div className="col-span-full text-center py-8">
               <p className="text-red-500">加载失败</p>

@@ -6,7 +6,20 @@ import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { ASR_MODEL_PRESETS, getAsrModelPreset } from '../shared/asr-models.js';
 
-const DOWNLOAD_SCRIPT = path.join(app.getAppPath(), 'scripts', 'download_asr_model.py');
+const DOWNLOAD_FUNASR_SCRIPT = path.join(app.getAppPath(), 'scripts', 'download_funasr_model.py');
+
+function normalizeModelScopeCache(cachePath) {
+  if (!cachePath) {
+    return { base: null, hub: null };
+  }
+  const normalized = path.resolve(cachePath);
+  // ModelScope 的默认目录结构通常是: <MODELSCOPE_CACHE>/hub/...
+  // 但历史上我们也可能把 env 直接设成了 ".../hub"。这里做兼容归一化。
+  if (path.basename(normalized).toLowerCase() === 'hub') {
+    return { base: path.dirname(normalized), hub: normalized };
+  }
+  return { base: normalized, hub: path.join(normalized, 'hub') };
+}
 
 function safeReaddir(targetPath) {
   try {
@@ -83,12 +96,30 @@ function getModelScopeRepoPath(cacheDir, repoId) {
 export default class ASRModelManager extends EventEmitter {
   constructor() {
     super();
-    // Primary cache directory (app-specific or configured)
-    this.cacheDir = process.env.ASR_CACHE_DIR
-      || (process.env.HF_HOME ? path.join(process.env.HF_HOME, 'hub') : path.join(app.getPath('userData'), 'hf-home', 'hub'));
-    fs.mkdirSync(this.cacheDir, { recursive: true });
+    // 应用级缓存根目录（可通过环境变量覆盖）
+    this.appCacheBase = process.env.ASR_CACHE_BASE || path.join(app.getPath('userData'), 'asr-cache');
+    this.hfHome = process.env.HF_HOME || path.join(this.appCacheBase, 'hf-home');
+    const msEnv = process.env.MODELSCOPE_CACHE || process.env.MODELSCOPE_CACHE_HOME;
+    const msNormalized = normalizeModelScopeCache(msEnv || path.join(this.appCacheBase, 'modelscope'));
+    this.msCacheBase = msNormalized.base;
+    this.msCacheHub = msNormalized.hub;
 
-    // Also check system default HuggingFace cache (where faster-whisper actually downloads models)
+    // Primary cache directory (共享给 HF 默认 hub)
+    this.cacheDir = process.env.ASR_CACHE_DIR || path.join(this.hfHome, 'hub');
+    try {
+      fs.mkdirSync(this.cacheDir, { recursive: true });
+      fs.mkdirSync(this.hfHome, { recursive: true });
+      if (this.msCacheBase) {
+        fs.mkdirSync(this.msCacheBase, { recursive: true });
+      }
+      if (this.msCacheHub) {
+        fs.mkdirSync(this.msCacheHub, { recursive: true });
+      }
+    } catch {
+      // ignore mkdir errors
+    }
+
+    // Also check system default HuggingFace cache (preexisting downloads)
     this.systemHfCache = path.join(os.homedir(), '.cache', 'huggingface', 'hub');
     // And system default ModelScope cache
     this.systemMsCache = path.join(os.homedir(), '.cache', 'modelscope', 'hub');
@@ -96,6 +127,8 @@ export default class ASRModelManager extends EventEmitter {
     // List of cache directories to check (in priority order)
     this.cacheDirs = [
       this.cacheDir,           // App-configured cache
+      this.msCacheHub,         // App ModelScope hub
+      this.msCacheBase,        // App ModelScope base (兼容某些工具只写到 base)
       this.systemHfCache,      // System default HF cache
       this.systemMsCache       // System default ModelScope cache
     ].filter(dir => {
@@ -115,10 +148,24 @@ export default class ASRModelManager extends EventEmitter {
     if (envPython && fs.existsSync(envPython)) {
       return envPython;
     }
+    const resourcesPath = process.resourcesPath;
     const projectRoot = app.isPackaged
-      ? path.join(process.resourcesPath, '..')
+      ? path.join(resourcesPath || app.getAppPath(), '..')
       : app.getAppPath();
+
+    // 优先使用打包内置的 python-env（extraResources）
+    const bundledPython = process.platform === 'win32'
+      ? path.join(resourcesPath || '', 'python-env', 'Scripts', 'python.exe')
+      : path.join(resourcesPath || '', 'python-env', 'bin', 'python3');
+
+    // 开发/调试：使用仓库下的 python-env/.venv
+    const repoPythonEnv = process.platform === 'win32'
+      ? path.join(projectRoot, 'python-env', 'Scripts', 'python.exe')
+      : path.join(projectRoot, 'python-env', 'bin', 'python3');
+
     const candidates = [
+      bundledPython,
+      repoPythonEnv,
       path.join(projectRoot, '.venv', 'bin', 'python'),
       path.join(projectRoot, '.venv', 'Scripts', 'python.exe'),
       'python3',
@@ -217,10 +264,116 @@ export default class ASRModelManager extends EventEmitter {
     return null;
   }
 
+  /**
+   * 获取 FunASR ONNX 模型的状态
+   * 这些模型由 funasr_onnx 库自己管理下载，缓存在 ~/.cache/modelscope/hub/ 目录
+   */
+  getFunASROnnxModelStatus(modelId, preset) {
+    const onnxModels = preset.onnxModels || {};
+    const modelDirs = Object.values(onnxModels);
+
+    // funasr_onnx 使用的缓存目录
+    // 注意：ModelScope 有时会将模型放在 hub/models/ 下，有时直接在 hub/ 下
+    const funasrCacheDirs = [
+      path.join(os.homedir(), '.cache', 'modelscope', 'hub'),
+      path.join(os.homedir(), '.cache', 'modelscope', 'hub', 'models'),
+      this.msCache,
+      path.join(this.msCache, 'models'),
+      this.systemMsCache,
+      path.join(this.systemMsCache, 'models'),
+    ];
+
+    let totalDownloadedBytes = 0;
+    let modelsFound = 0;
+    let latestUpdatedAt = null;
+    let foundPaths = [];
+
+    for (const modelDir of modelDirs) {
+      if (!modelDir) continue;
+
+      // modelDir 格式: "damo/speech_fsmn_vad_zh-cn-16k-common-onnx"
+      for (const cacheDir of funasrCacheDirs) {
+        const modelPath = path.join(cacheDir, modelDir);
+        try {
+          if (fs.existsSync(modelPath)) {
+            const size = directorySize(modelPath);
+            totalDownloadedBytes += size;
+            modelsFound++;
+            foundPaths.push(modelPath);
+
+            try {
+              const stat = fs.statSync(modelPath);
+              if (!latestUpdatedAt || stat.mtimeMs > latestUpdatedAt) {
+                latestUpdatedAt = stat.mtimeMs;
+              }
+            } catch {
+              // ignore
+            }
+            break; // Found this model, move to next
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    const totalModels = modelDirs.length;
+    const isDownloaded = modelsFound >= totalModels;
+
+    // 如果所有模型都找到了，使用第一个找到的路径作为快照路径
+    const snapshotPath = foundPaths.length > 0 ? path.dirname(foundPaths[0]) : null;
+
+    console.log(`[ASR ModelManager] FunASR ONNX Status for ${modelId}:`, {
+      modelsFound,
+      totalModels,
+      isDownloaded,
+      totalDownloadedBytes,
+      foundPaths: foundPaths.slice(0, 2), // 只打印前两个
+    });
+
+    return {
+      modelId,
+      repoId: preset.repoId,
+      modelScopeRepoId: preset.modelScopeRepoId,
+      sizeBytes: preset.sizeBytes || 0,
+      downloadedBytes: totalDownloadedBytes,
+      isDownloaded,
+      snapshotPath,
+      updatedAt: latestUpdatedAt,
+      activeDownload: this.activeDownloads.has(modelId),
+      source: 'funasr_onnx',
+      // FunASR 特有信息
+      onnxModelsFound: modelsFound,
+      onnxModelsTotal: totalModels,
+    };
+  }
+
   getModelStatus(modelId) {
     const preset = getAsrModelPreset(modelId);
     if (!preset) {
       return null;
+    }
+
+    // 云端模型：无需下载，本地恒定可用（但依赖网络与 API）
+    if (preset.engine === 'siliconflow' || preset.isRemote) {
+      return {
+        modelId,
+        repoId: preset.repoId || null,
+        modelScopeRepoId: preset.modelScopeRepoId || null,
+        sizeBytes: 0,
+        downloadedBytes: 0,
+        isDownloaded: true,
+        snapshotPath: null,
+        updatedAt: Date.now(),
+        activeDownload: false,
+        source: 'remote'
+      };
+    }
+
+    // FunASR ONNX 模型特殊处理
+    // 这些模型由 funasr_onnx 库自己管理下载，缓存在 ~/.cache/modelscope/hub/damo/ 目录
+    if (preset.engine === 'funasr' && preset.onnxModels) {
+      return this.getFunASROnnxModelStatus(modelId, preset);
     }
 
     // Check HuggingFace cache
@@ -238,7 +391,7 @@ export default class ASRModelManager extends EventEmitter {
     }
 
     // Check ModelScope cache
-    // ModelScope structure: cacheDir / repoId (e.g. gpustack/faster-whisper-medium)
+    // ModelScope structure: cacheDir / repoId (e.g. damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx)
     // or sometimes cacheDir / repoId / .mv / ...
     // Simple check: cacheDir / repoId
     let msSnapshotPath = null;
@@ -326,7 +479,7 @@ export default class ASRModelManager extends EventEmitter {
     }
   }
 
-  startDownload(modelId, source = 'huggingface') {
+  startDownload(modelId, source = 'huggingface', allowFallback = true) {
     if (this.activeDownloads.has(modelId)) {
       return { status: 'running' };
     }
@@ -334,37 +487,66 @@ export default class ASRModelManager extends EventEmitter {
     if (!preset) {
       throw new Error(`Unknown ASR model: ${modelId}`);
     }
+
+    // 云端模型不需要下载
+    if (preset.engine === 'siliconflow' || preset.isRemote) {
+      const status = this.getModelStatus(modelId);
+      this.broadcast('asr-model-download-complete', {
+        modelId,
+        repoId: preset.repoId,
+        status
+      });
+      return { status: 'completed' };
+    }
+
+    // FunASR ONNX 模型由 funasr-onnx 库自己管理下载
+    // 我们可以调用辅助脚本来触发这个下载过程
+    if (preset.engine === 'funasr' && preset.onnxModels) {
+      const status = this.getFunASROnnxModelStatus(modelId, preset);
+      if (status.isDownloaded) {
+        console.log(`[ASR ModelManager] FunASR ONNX model ${modelId} is already downloaded`);
+        this.broadcast('asr-model-download-complete', {
+          modelId,
+          repoId: preset.repoId,
+          status,
+        });
+        return { status: 'completed' };
+      }
+      
+      // 未下载，继续执行，使用 download_funasr_model.py
+      console.log(`[ASR ModelManager] FunASR ONNX model ${modelId} will be downloaded via script`);
+      // 不返回 'auto-download'，而是继续执行后续的 spawn 逻辑，但要替换 script 和 args
+    }
+
     const pythonExecutable = this.pythonPath;
     if (!pythonExecutable) {
       throw new Error('Python executable not found');
     }
 
-    const repoId = source === 'modelscope' && preset.modelScopeRepoId ? preset.modelScopeRepoId : preset.repoId;
+    const repoId = preset.modelScopeRepoId || preset.repoId;
+
+    const scriptPath = DOWNLOAD_FUNASR_SCRIPT;
+    const args = [
+      scriptPath,
+      '--model-id',
+      preset.id,
+      '--cache-dir',
+      this.msCacheBase || this.msCacheHub // FunASR 默认用 ModelScope 缓存
+    ];
 
     console.log(`[ASR ModelManager] Starting download: modelId=${modelId}, source=${source}, repoId=${repoId}`);
     console.log(`[ASR ModelManager] Python path: ${pythonExecutable}`);
-    console.log(`[ASR ModelManager] Download script: ${DOWNLOAD_SCRIPT}`);
-
-    const jobs = Math.max(2, Math.min(8, Math.floor((os.cpus()?.length || 4) / 2)) || 2);
-    const args = [
-      DOWNLOAD_SCRIPT,
-      '--model-id',
-      preset.id,
-      '--repo-id',
-      repoId,
-      '--cache-dir',
-      this.cacheDir,
-      '--jobs',
-      String(jobs),
-      '--source',
-      source
-    ];
-
+    console.log(`[ASR ModelManager] Download script: ${scriptPath}`);
     console.log(`[ASR ModelManager] Spawn command: ${pythonExecutable} ${args.join(' ')}`);
 
+    const hfHomeEnv = this.hfHome || process.env.HF_HOME;
+    const msCacheEnv = this.msCacheBase || process.env.MODELSCOPE_CACHE;
     const env = {
       ...process.env,
       ASR_CACHE_DIR: this.cacheDir,
+      HF_HOME: hfHomeEnv,
+      MODELSCOPE_CACHE: msCacheEnv,
+      MODELSCOPE_CACHE_HOME: msCacheEnv,
       PYTHONIOENCODING: 'utf-8',
     };
     const child = spawn(pythonExecutable, args, { env });
@@ -422,7 +604,7 @@ export default class ASRModelManager extends EventEmitter {
           status,
         });
       } else {
-        console.error(`[ASR ModelManager] Download failed: modelId=${modelId}, code=${code}`);
+        console.error(`[ASR ModelManager] Download failed: modelId=${modelId}, code=${code}, source=${source}`);
         this.broadcast('asr-model-download-error', {
           modelId,
           repoId: repoId,
@@ -461,16 +643,54 @@ export default class ASRModelManager extends EventEmitter {
       if (payload.totalBytes) {
         ctx.totalBytes = payload.totalBytes;
       }
+      if (payload.message) {
+        this.broadcast('asr-model-download-log', {
+          modelId: ctx.modelId,
+          repoId: ctx.repoId,
+          message: payload.message,
+        });
+      }
       if (payload.snapshotRelativePath) {
         ctx.snapshotPath = path.isAbsolute(payload.snapshotRelativePath)
           ? payload.snapshotRelativePath
           : path.join(this.cacheDir, payload.snapshotRelativePath);
+
+        // ModelScope 下载的落盘路径可能与 cacheDir 结构不同，尝试解析实际目录
+        if (payload.source === 'modelscope') {
+          const resolvedMsPath =
+            getModelScopeRepoPath(this.cacheDir, ctx.repoId) ||
+            getModelScopeRepoPath(this.msCache, ctx.repoId) ||
+            getModelScopeRepoPath(this.systemMsCache, ctx.repoId) ||
+            getModelScopeRepoPath(this.systemHfCache, ctx.repoId);
+          if (resolvedMsPath) {
+            ctx.snapshotPath = resolvedMsPath;
+          }
+        }
+      }
+      // 记录 downloads 目录的现有子目录，后续用于估算部分下载进度（HF 临时文件）
+      ctx.downloadsDir = path.join(this.cacheDir, 'downloads');
+      try {
+        const baselineEntries = safeReaddir(ctx.downloadsDir).filter((entry) => entry.isDirectory());
+        ctx.downloadsBaseDirs = new Set(baselineEntries.map((entry) => entry.name));
+      } catch {
+        ctx.downloadsBaseDirs = null;
       }
       if (!ctx.timer) {
         ctx.timer = setInterval(() => this.emitProgress(ctx), 1000);
       }
     } else if (payload.event === 'completed') {
+      if (payload.localDir) {
+        ctx.snapshotPath = payload.localDir;
+      }
       this.emitProgress(ctx, true);
+    } else if (payload.event === 'warning') {
+      // 仅记录警告，避免在 HuggingFace 失败但可回退时直接报错
+      this.broadcast('asr-model-download-log', {
+        modelId: ctx.modelId,
+        repoId: ctx.repoId,
+        message: payload.message || 'download warning',
+        traceback: payload.traceback,
+      });
     } else if (payload.event === 'error') {
       this.broadcast('asr-model-download-error', {
         modelId: ctx.modelId,
@@ -486,10 +706,26 @@ export default class ASRModelManager extends EventEmitter {
   }
 
   emitProgress(ctx, force = false) {
-    if (!ctx.snapshotPath) {
+    // 若 snapshot 路径尚未确认，但 modelscope 目录已创建，尝试动态解析
+    if ((!ctx.snapshotPath || !fs.existsSync(ctx.snapshotPath)) && ctx.source === 'modelscope') {
+      const resolvedMsPath =
+        getModelScopeRepoPath(this.cacheDir, ctx.repoId) ||
+        getModelScopeRepoPath(this.msCache, ctx.repoId) ||
+        getModelScopeRepoPath(this.systemMsCache, ctx.repoId) ||
+        getModelScopeRepoPath(this.systemHfCache, ctx.repoId);
+      if (resolvedMsPath) {
+        ctx.snapshotPath = resolvedMsPath;
+      }
+    }
+
+    if (!ctx.snapshotPath && !ctx.downloadsDir) {
       return;
     }
-    const downloadedBytes = directorySize(ctx.snapshotPath);
+
+    const snapshotBytes = ctx.snapshotPath ? directorySize(ctx.snapshotPath) : 0;
+    // HF 下载时，临时文件位于 cacheDir/downloads/<uuid>，用于显示部分下载进度
+    const tempBytes = this.computeDownloadTempBytes(ctx);
+    const downloadedBytes = Math.max(snapshotBytes, tempBytes);
     const totalBytes = ctx.totalBytes || downloadedBytes;
     const now = Date.now();
     const elapsedMs = now - (ctx.lastTimestamp || now);
@@ -508,6 +744,28 @@ export default class ASRModelManager extends EventEmitter {
       clearInterval(ctx.timer);
       ctx.timer = null;
     }
+  }
+
+  computeDownloadTempBytes(ctx) {
+    if (!ctx.downloadsDir) {
+      return 0;
+    }
+    let total = 0;
+    const baseline = ctx.downloadsBaseDirs || new Set();
+    let entries = [];
+    try {
+      entries = safeReaddir(ctx.downloadsDir).filter((entry) => entry.isDirectory());
+    } catch {
+      entries = [];
+    }
+    for (const entry of entries) {
+      if (baseline.has(entry.name)) {
+        continue;
+      }
+      const dirPath = path.join(ctx.downloadsDir, entry.name);
+      total += directorySize(dirPath);
+    }
+    return total;
   }
 
   cancelDownload(modelId) {
@@ -556,4 +814,3 @@ export default class ASRModelManager extends EventEmitter {
     });
   }
 }
-

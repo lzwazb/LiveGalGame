@@ -1,0 +1,18 @@
+[project]
+name = "structured-memory-service"
+version = "0.1.0"
+description = "Lightweight structured profile/event memory sidecar for LiveGalGame"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi==0.115.5",
+  "uvicorn==0.32.1",
+  "sqlmodel==0.0.22",
+  "python-multipart==0.0.9"
+]
+
+[tool.uv]
+dev-dependencies = []
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

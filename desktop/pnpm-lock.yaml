@@ -11,6 +11,9 @@ importers:
       '@ricky0123/vad-web':
         specifier: ^0.0.29
         version: 0.0.29
+      '@toon-format/toon':
+        specifier: ^2.0.1
+        version: 2.1.0
       '@xenova/transformers':
         specifier: ^2.17.2
         version: 2.17.2
@@ -23,12 +26,18 @@ importers:
       electron-store:
         specifier: ^8.2.0
         version: 8.2.0
+      kill-port:
+        specifier: ^2.0.1
+        version: 2.0.1
       node-addon-api:
         specifier: ^7.0.0
         version: 7.1.1
       openai:
         specifier: ^6.9.0
         version: 6.9.1(ws@8.18.3)
+      portfinder:
+        specifier: ^1.0.32
+        version: 1.0.38
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -41,6 +50,9 @@ importers:
       sharp:
         specifier: 0.34.5
         version: 0.34.5
+      tree-kill:
+        specifier: ^1.2.2
+        version: 1.2.2
       ws:
         specifier: ^8.18.3
         version: 8.18.3
@@ -75,9 +87,6 @@ importers:
       electron-builder:
         specifier: ^25.1.8
         version: 25.1.8(electron-builder-squirrel-windows@25.1.8)
-      kill-port:
-        specifier: ^2.0.1
-        version: 2.0.1
       postcss:
         specifier: ^8.5.6
         version: 8.5.6
@@ -783,6 +792,9 @@ packages:
   '@szmarczak/http-timer@4.0.6':
     resolution: {integrity: sha512-4BAffykYOgO+5nzBWYwE3W90sBgLJoUPRWWcL8wlyiM8IB8ipJz3UMJ9KXQd1RKQXpKp8Tutn80HZtWsu2u76w==}
     engines: {node: '>=10'}
+
+  '@toon-format/toon@2.1.0':
+    resolution: {integrity: sha512-JwWptdF5eOA0HaQxbKAzkpQtR4wSWTEfDlEy/y3/4okmOAX1qwnpLZMmtEWr+ncAhTTY1raCKH0kteHhSXnQqg==}
 
   '@tootallnate/once@2.0.0':
     resolution: {integrity: sha512-XCuKFP5PS55gnMVu3dty8KPatLqUoy/ZYzDzAGCQ8JNFCkLXzmI7vNHCR+XpbZaMWQK/vQubr7PkYq8g470J/A==}
@@ -2310,6 +2322,10 @@ packages:
     resolution: {integrity: sha512-uysumyrvkUX0rX/dEVqt8gC3sTBzd4zoWfLeS29nb53imdaXVvLINYXTI2GNqzaMuvacNx4uJQ8+b3zXR0pkgQ==}
     engines: {node: '>=10.4.0'}
 
+  portfinder@1.0.38:
+    resolution: {integrity: sha512-rEwq/ZHlJIKw++XtLAO8PPuOQA/zaPJOZJ37BVuN97nLpMJeuDVLVGRwbFoBgLudgdTMP2hdRJP++H+8QOA3vg==}
+    engines: {node: '>= 10.12'}
+
   postcss-import@15.1.0:
     resolution: {integrity: sha512-hpr+J05B2FVYUAXHeK1YyI267J/dDDhMU6B6civm8hSY1jYJnBXxzKDKDswzJmtLHryrjhnDjqqp/49t8FALew==}
     engines: {node: '>=14.0.0'}
@@ -3557,6 +3573,8 @@ snapshots:
   '@szmarczak/http-timer@4.0.6':
     dependencies:
       defer-to-connect: 2.0.1
+
+  '@toon-format/toon@2.1.0': {}
 
   '@tootallnate/once@2.0.0': {}
 
@@ -5287,6 +5305,13 @@ snapshots:
       '@xmldom/xmldom': 0.8.11
       base64-js: 1.5.1
       xmlbuilder: 15.1.1
+
+  portfinder@1.0.38:
+    dependencies:
+      async: 3.2.6
+      debug: 4.4.3
+    transitivePeerDependencies:
+      - supports-color
 
   postcss-import@15.1.0(postcss@8.5.6):
     dependencies:
